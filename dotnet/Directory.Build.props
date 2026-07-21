@@ -9,6 +9,8 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'GitHub.Copilot.SDK'">
+    <!-- Lumi consumes this project from source; package builds normally provide the runtime version via generated props. -->
+    <CopilotCliVersion Condition="'$(CopilotCliVersion)' == ''">1.0.73</CopilotCliVersion>
     <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)Open.snk</AssemblyOriginatorKeyFile>
     <SignAssembly>true</SignAssembly>
   </PropertyGroup>
