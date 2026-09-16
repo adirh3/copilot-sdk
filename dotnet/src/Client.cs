@@ -1171,10 +1171,10 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(config);
         ValidateGitHubTokenConfig(config);
-        if (config.SkillProvider is not null && config.Cloud is not null && string.IsNullOrEmpty(config.SessionId))
+        if (config.SkillProvider is not null && config.Cloud is not null)
         {
             throw new ArgumentException(
-                "SkillProvider requires a session ID before creation; server-assigned cloud session IDs are not supported.",
+                "SkillProvider is not supported for cloud sessions, including those with an explicit session ID.",
                 nameof(config));
         }
 

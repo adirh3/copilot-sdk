@@ -3756,7 +3756,8 @@ public abstract class SessionConfigBase
     /// The provider is registered before the create/resume request and is not serialized or persisted.
     /// Supply it again on resume. Setting <see cref="EnableSkills"/> to <see langword="false"/>
     /// keeps the provider bound but prevents the runtime from loading skills. File-based skills may
-    /// coexist with provider skills. Cloud creation with a server-assigned session ID is not supported.
+    /// coexist with provider skills. Cloud sessions do not support providers, regardless of whether
+    /// the caller supplies a session ID.
     /// </remarks>
     [Experimental(Diagnostics.Experimental)]
     [JsonIgnore]

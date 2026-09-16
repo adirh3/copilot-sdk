@@ -261,8 +261,10 @@ public sealed partial class ClientSessionLifetimeTests
         Assert.True(provider.ReadCancellationToken.IsCancellationRequested);
     }
 
-    [Fact]
-    public async Task SkillProvider_Rejects_Server_Assigned_Cloud_Ids_Before_Connecting()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("explicit-skill-session")]
+    public async Task SkillProvider_Rejects_Cloud_Sessions_Before_Connecting(string? sessionId)
     {
         await using var server = await FakeCopilotServer.StartAsync();
         await using var client = new CopilotClient(new CopilotClientOptions { Connection = RuntimeConnection.ForUri(server.Url) });
@@ -270,10 +272,12 @@ public sealed partial class ClientSessionLifetimeTests
         var error = await Assert.ThrowsAsync<ArgumentException>(() => client.CreateSessionAsync(new SessionConfig
         {
             Cloud = new CloudSessionOptions(),
+            SessionId = sessionId,
             SkillProvider = new TestSkillProvider()
         }));
 
-        Assert.Contains("server-assigned cloud session IDs are not supported", error.Message);
+        Assert.Equal("config", error.ParamName);
+        Assert.Contains("SkillProvider is not supported for cloud sessions", error.Message);
         Assert.Empty(server.Requests);
     }
 

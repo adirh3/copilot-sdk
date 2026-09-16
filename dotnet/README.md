@@ -832,8 +832,11 @@ sealed class ApplicationSkills : SkillProvider
 ```
 
 - The provider uses experimental native callbacks; it does not expose supporting files or assets.
+- Cloud sessions do not support skill providers, even with an explicit session ID.
 - Markdown frontmatter must agree with the catalog descriptor. Names must be unique
   case-insensitively and match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
+- Catalogs are limited to 1,024 descriptors and 1 MiB of aggregate metadata. Each
+  complete Markdown response is limited to 1 MiB of UTF-8 text.
 - Implementations must support concurrent calls and honor cancellation.
 - Re-supply `SkillProvider` on resume. Its binding is not serialized or persisted.
 - `EnableSkills = false` leaves the provider bound but dormant. Set it to `true`

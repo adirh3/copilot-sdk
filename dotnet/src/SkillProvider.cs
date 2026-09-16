@@ -31,6 +31,7 @@ public abstract class SkillProvider
     /// <returns>
     /// The skill catalog, or an empty list when no skills are available. Names must be unique
     /// using a case-insensitive comparison and satisfy <see cref="SkillProviderDescriptor.Name"/>.
+    /// The native runtime limits catalogs to 1,024 descriptors and 1 MiB of aggregate metadata.
     /// </returns>
     public abstract Task<IReadOnlyList<SkillProviderDescriptor>> ListAsync(CancellationToken cancellationToken = default);
 
@@ -42,6 +43,7 @@ public abstract class SkillProvider
     /// <returns>
     /// The complete Markdown, including YAML frontmatter matching the metadata returned by
     /// <see cref="ListAsync"/>. The native runtime rejects inconsistent metadata.
+    /// The complete response text must not exceed 1 MiB when encoded as UTF-8.
     /// </returns>
     /// <remarks>Throw if the named skill is unavailable; do not return a file path.</remarks>
     public abstract Task<string> ReadAsync(string name, CancellationToken cancellationToken = default);
