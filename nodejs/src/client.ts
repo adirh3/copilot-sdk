@@ -49,6 +49,7 @@ import { createSessionFsAdapter, type SessionFsProvider } from "./sessionFsProvi
 import { createCopilotRequestAdapter } from "./copilotRequestHandler.js";
 import type { CopilotRequestHandler } from "./copilotRequestHandler.js";
 import { getTraceContext } from "./telemetry.js";
+import { toJsonSchema } from "./schema.js";
 import { ToolSet } from "./toolSet.js";
 import type {
     AutoModeSwitchRequest,
@@ -59,6 +60,7 @@ import type {
     CustomAgentConfig,
     ExitPlanModeRequest,
     ExitPlanModeResult,
+    ExtensionLaunchProvider,
     ExtensionJoinOptions,
     ForegroundSessionInfo,
     GetAuthStatusResponse,
@@ -87,7 +89,6 @@ import type {
     SessionMetadata,
     SystemMessageCustomizeConfig,
     TelemetryConfig,
-    Tool,
     TraceContextProvider,
     TypedSessionLifecycleHandler,
 } from "./types.js";
@@ -100,18 +101,6 @@ import type { FactoryHandle } from "./factory.js";
  */
 const MIN_PROTOCOL_VERSION = 3;
 const RUNTIME_SHUTDOWN_TIMEOUT_MS = 10_000;
-
-/**
- * Check if value is a Zod schema (has toJSONSchema method)
- */
-function isZodSchema(value: unknown): value is { toJSONSchema(): Record<string, unknown> } {
-    return (
-        value != null &&
-        typeof value === "object" &&
-        "toJSONSchema" in value &&
-        typeof (value as { toJSONSchema: unknown }).toJSONSchema === "function"
-    );
-}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -158,17 +147,6 @@ async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise
             onExit();
         }
     });
-}
-
-/**
- * Convert tool parameters to JSON schema format for sending to CLI
- */
-function toJsonSchema(parameters: Tool["parameters"]): Record<string, unknown> | undefined {
-    if (!parameters) return undefined;
-    if (isZodSchema(parameters)) {
-        return parameters.toJSONSchema();
-    }
-    return parameters;
 }
 
 /** Implicit provider name for the singular, whole-session {@link ProviderConfig}. */
@@ -491,6 +469,7 @@ export class CopilotClient {
     /** Connection-level session filesystem config, set via constructor option. */
     private sessionFsConfig: SessionFsConfig | null = null;
     private requestHandler: CopilotRequestHandler | null = null;
+    private extensionLaunchProvider?: ExtensionLaunchProvider;
     private builtinPluginDirectories: string[] = [];
     private onGitHubTelemetry?: (notification: GitHubTelemetryNotification) => void | Promise<void>;
     private clientGlobalHandlers: import("./generated/rpc.js").ClientGlobalApiHandlers = {};
@@ -689,6 +668,7 @@ export class CopilotClient {
         this.onGetTraceContext = options.onGetTraceContext;
         this.sessionFsConfig = options.sessionFs ?? null;
         this.requestHandler = options.requestHandler ?? null;
+        this.extensionLaunchProvider = options.extensionLaunchProvider;
         this.onGitHubTelemetry = options.onGitHubTelemetry;
         this.setupClientGlobalHandlers();
 
@@ -834,6 +814,7 @@ export class CopilotClient {
 
     private setupClientGlobalHandlers(): void {
         const handlers: import("./generated/rpc.js").ClientGlobalApiHandlers = {};
+        handlers.extensionLaunchProvider = this.extensionLaunchProvider;
         if (this.requestHandler) {
             handlers.llmInference = createCopilotRequestAdapter(this.requestHandler, () => {
                 if (!this.connection) {
@@ -969,6 +950,10 @@ export class CopilotClient {
 
             // Verify protocol version compatibility
             await this.verifyProtocolVersion();
+
+            if (this.extensionLaunchProvider) {
+                await this.rpc.registerExtensionLaunchProvider();
+            }
 
             if (this.builtinPluginDirectories.length > 0) {
                 try {

@@ -3,6 +3,8 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+#[cfg(not(feature = "bundled-cli"))]
+mod cache_paths;
 /// Canvas declarations, provider callbacks, and host-side canvas RPC types.
 pub mod canvas;
 mod canvas_dispatch;
@@ -2321,10 +2323,7 @@ impl Client {
                 ))
                 .into());
             }
-            return Err(Error::with_message(
-                ErrorKind::Rpc { code: err.code },
-                err.message,
-            ));
+            return Err(Error::from_rpc(err.code, err.message, err.data));
         }
         Ok(response.result.unwrap_or(serde_json::Value::Null))
     }

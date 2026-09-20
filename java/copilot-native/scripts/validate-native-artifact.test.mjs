@@ -100,6 +100,33 @@ test("accepts a matching, complete Darwin classifier", (t) => {
   );
 });
 
+test("accepts a matching, complete Darwin x64 classifier", (t) => {
+  const fixture = createFixture(t);
+  const darwinClassifier = "darwin-x64";
+  const darwinArtifactName =
+    "copilot-sdk-java-runtime-1.2.3-darwin-x64.jar";
+  const darwinJarPath = path.join(fixture.root, darwinArtifactName);
+  createNativeClassifierTestFixture({
+    classifier: darwinClassifier,
+    outputPath: darwinJarPath,
+    repoRoot: fixture.repoRoot,
+  });
+
+  assert.deepEqual(
+    validateNativeClassifierJar({
+      classifier: darwinClassifier,
+      jarPath: darwinJarPath,
+      expectedFilename: darwinArtifactName,
+      repoRoot: fixture.repoRoot,
+    }),
+    {
+      classifier: darwinClassifier,
+      nativeVersion: "9.8.7",
+      sha256: undefined,
+    },
+  );
+});
+
 test("accepts a matching, complete Linux ARM64 classifier", (t) => {
   const fixture = createFixture(t);
   const linuxArm64Classifier = "linux-arm64";
@@ -488,8 +515,10 @@ function createPublicationFixture(
     for (const nativeClassifier of [
       "linux-x64",
       "linux-arm64",
+      "linuxmusl-x64",
       "win32-x64",
       "win32-arm64",
+      "darwin-x64",
       "darwin-arm64",
     ]) {
       createNativeClassifierTestFixture({

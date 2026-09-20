@@ -365,9 +365,12 @@ next credential-consuming operation; there is no background refresh timer.
 ### Auto routing tiers
 
 Use `CapiSessionOptions::with_auto_tier` to select `AutoTier::Efficiency`,
-`AutoTier::Balance`, or `AutoTier::Intelligence`. This option is meaningful only
-with model `auto` (Auto mode V2).
+`AutoTier::Balance`, `AutoTier::Intelligence`, or `AutoTier::Fast`. This option
+is meaningful only with model `auto` (Auto mode V2).
 It requires a runtime version that supports `capi.autoTier`.
+`AutoTier::Fast` is an integrator-only latency preset, not a first-party
+GitHub Copilot product preference — the SDK does not decide Fast eligibility
+or apply it implicitly.
 
 ```rust
 use github_copilot_sdk::{AutoTier, CapiSessionOptions, SessionConfig};
@@ -388,7 +391,7 @@ resume succeeds; it cannot change a turn that is already in flight. The SDK does
 
 Change the Auto routing preference without changing the selected model. The runtime does not apply the preference immediately: it records the request and commits it only when a later user turn using the `auto` model successfully obtains a usable model from the provider, so a `pending` status confirms acceptance rather than effect. Only the most recent request survives.
 
-Watch for the outcome through the `session.model_change` event on success or the ephemeral `session.auto_tier_switch_failed` event on failure. Read the authoritative committed, pending, and activating preferences at any time through the session's `model.getCurrent` RPC method.
+Watch for the outcome through the `session.model_change` event on success or the ephemeral `session.auto_tier_switch_failed` event on failure. A failed activation leaves the incumbent effective tier unchanged. Read the authoritative committed, pending, and activating preferences at any time through the session's `model.getCurrent` RPC method.
 
 ```rust,ignore
 use github_copilot_sdk::{AutoTier, ModelSwitchAutoTierStatus};
@@ -870,7 +873,49 @@ session
     .await?;
 ```
 
-Default timeout is 60 seconds. Only one `send_and_wait` can be active per session — concurrent calls return an error.
+Default timeout is 60 seconds. Only one unformatted `send_and_wait` can be active
+per session; it also prevents other sends until it completes.
+
+### Structured output (experimental)
+
+Enable the existing `derive` feature and use the same `schemars`/Serde integration
+as typed custom tools:
+
+```rust,no_run
+# #[cfg(feature = "derive")]
+# mod example {
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Inventory {
+    count: i32,
+    color: String,
+}
+
+# async fn example(session: &github_copilot_sdk::session::Session) -> Result<(), github_copilot_sdk::Error> {
+let inventory: Inventory = session
+    .send_and_wait_typed("Call get_inventory, then report the widget count and color.")
+    .await?;
+# Ok(())
+# }
+# }
+```
+
+The helper uses the existing `schema_for::<T>()` generator and deserializes the
+final JSON. Serde deserialization is not full JSON Schema validation. Provider
+schema restrictions apply; `deny_unknown_fields` closes objects for strict output.
+For explicit schemas, `MessageOptions::with_response_schema` works with `send` or
+`send_and_wait` without the `derive` feature and returns ordinary events.
+
+Schemas apply to one run, including tools, steering, and stop-hook corrections,
+not independent sends or subagents. Streaming remains text. Structured waits
+select the last correlated root message without tool requests at non-autopilot
+idle and support concurrent structured waits with independent results. Later
+queued work can delay idle. Aborts, session errors after the run starts, missing
+output, and event-stream lag fail the wait. Dropping the future or timing out
+unsubscribes without aborting the agent. Immediate steering cannot set a schema.
 
 ### Newtypes
 
@@ -1073,15 +1118,19 @@ github-copilot-sdk = { version = "1", default-features = false }
      managed runtime artifacts directly into the platform cache using staging
      files and atomic renames.
 
-3. **Runtime:** in both modes the artifacts share one versioned directory:
+3. **Runtime:** embedded CLI artifacts and build-time-extracted hostless runtime
+   artifacts use separate versioned namespaces:
 
-   | OS | Path |
-   |----|------|
-   | macOS | `~/Library/Caches/github-copilot-sdk/cli/<version>/` |
-   | Linux | `${XDG_CACHE_HOME:-~/.cache}/github-copilot-sdk/cli/<version>/` |
-   | Windows | `%LOCALAPPDATA%\github-copilot-sdk\cli\<version>\` |
+   | OS | `bundled-cli` on | `bundled-cli` off |
+   |----|------------------|-------------------|
+   | macOS | `~/Library/Caches/github-copilot-sdk/cli/<version>/` | `~/Library/Caches/github-copilot-sdk/runtime/<version>/` |
+   | Linux | `${XDG_CACHE_HOME:-~/.cache}/github-copilot-sdk/cli/<version>/` | `${XDG_CACHE_HOME:-~/.cache}/github-copilot-sdk/runtime/<version>/` |
+   | Windows | `%LOCALAPPDATA%\github-copilot-sdk\cli\<version>\` | `%LOCALAPPDATA%\github-copilot-sdk\runtime\<version>\` |
 
-   Old version directories accumulate in siblings; clean them up at your leisure.
+   Separating these namespaces prevents stale hostless-runtime cleanup during a
+   non-bundled build from deleting a same-version bundled CLI used by another
+   application. Old version directories accumulate in siblings; clean them up
+   at your leisure.
 
 ### Overriding the extraction location
 

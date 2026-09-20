@@ -74,7 +74,7 @@ implementation 'com.github:copilot-sdk-java:1.0.15-preview.1-SNAPSHOT'
 
 ## In-process mode (experimental)
 
-The SDK supports running the Copilot runtime **in-process** as a native library instead of spawning a separate CLI process. This eliminates process management overhead and simplifies deployment. In-process mode is currently experimental and supported on **linux-x64** (glibc), **linux-arm64** (glibc), **win32-x64**, **win32-arm64**, and **darwin-arm64**.
+The SDK supports running the Copilot runtime **in-process** as a native library instead of spawning a separate CLI process. This eliminates process management overhead and simplifies deployment. In-process mode is currently experimental and supported on **linux-x64** (glibc), **linux-arm64** (glibc), **linuxmusl-x64**, **win32-x64**, **win32-arm64**, **darwin-x64**, and **darwin-arm64**.
 
 Because in-process mode is experimental, see the [Using experimental APIs](#using-experimental-apis) section for how to opt in.
 
@@ -97,7 +97,7 @@ Add both the SDK and the platform-specific native runtime to your project:
         <version>${copilot.version}</version>
         <classifier>linux-x64</classifier>
     </dependency>
-    <!-- Use linux-arm64, win32-x64, win32-arm64, or darwin-arm64 on those target platforms -->
+    <!-- Use linux-arm64, linuxmusl-x64, win32-x64, win32-arm64, darwin-x64, or darwin-arm64 on those target platforms -->
     <!-- JNA (required for in-process mode) -->
     <dependency>
         <groupId>net.java.dev.jna</groupId>
@@ -178,6 +178,11 @@ directly.
 
 `CopilotClientOptions.setCwd(...)` sets the runtime process working directory, which otherwise inherits the current process working directory. `SessionConfig.setWorkingDirectory(...)` sets the session working directory, which otherwise defaults to the runtime process working directory.
 
+`CopilotClientOptions.setExtensionLaunchProvider(...)` configures an experimental
+connection-level resolver for extension launch profiles. The client installs the
+reverse-RPC handler and registers the provider during startup before sessions can
+be created.
+
 `SessionConfig.setAskUserVariant(AskUserVariant.ELICITATION)` selects the
 structured form-based `ask_user` tool when an elicitation handler is also set.
 The default is `AskUserVariant.LEGACY`. Re-supply the option and handler through
@@ -230,6 +235,41 @@ system prompt.
 Agent sources serialize as `agent-<id>`. Pass the agent ID without adding a
 prefix. The SDK preserves its case and whitespace and rejects null IDs.
 `sendAndWait` accepts the same source values as `send`.
+
+## Structured output (experimental)
+
+Annotate a result record or class using the same compile-time schema-generation
+approach as `@CopilotTool`. No additional schema dependency is needed:
+
+```java
+@CopilotResponse
+public record Inventory(int count, String color) {}
+
+Inventory inventory = session.sendAndWait(
+    "Call get_inventory, then report the widget count and color.",
+    Inventory.class
+).get();
+```
+
+Enable annotation processing with `CopilotResponseProcessor` (automatically
+discoverable alongside the SDK's existing processors), and opt in to experimental
+APIs as described below. The processor reuses the custom-tool `SchemaGenerator`,
+closing record/class objects for strict output. Its existing type-mapping
+limitations apply: custom Jackson naming/converters and recursive types need an explicit schema.
+Provider restrictions, including optional-field and dictionary restrictions,
+still apply. Jackson deserialization is not full JSON Schema validation.
+
+For an explicit schema, use `new MessageOptions().setPrompt(...).setResponseSchema(schema)`
+with `send` or `sendAndWait`; schema-bearing `sendAndWait` returns the ordinary
+message event. Typed overloads accept message options and a timeout, clone the
+options, and reject explicit schemas and immediate delivery.
+
+Schemas apply to one run, including tools, steering, and stop-hook corrections;
+independent sends and subagents do not inherit them. Streaming stays text.
+Structured waits return the last correlated root message without tool requests at
+non-autopilot idle. Concurrent waits keep their own results; queued work can delay
+idle. Aborts, session errors after the run starts, and missing final output fail.
+Cancellation and timeout stop waiting without aborting the agent.
 
 ## Permission Handling
 
@@ -369,9 +409,12 @@ For design context and decision rationale, see [ADR-006](docs/adr/adr-006-tool-d
 ## Auto routing tiers
 
 Use `CapiSessionOptions.setAutoTier(...)` to select `AutoTier.EFFICIENCY`,
-`AutoTier.BALANCE`, or `AutoTier.INTELLIGENCE`. This option is meaningful only
-with model `auto` (Auto mode V2).
+`AutoTier.BALANCE`, `AutoTier.INTELLIGENCE`, or `AutoTier.FAST`. This option is
+meaningful only with model `auto` (Auto mode V2).
 It requires a runtime version that supports `capi.autoTier`.
+`AutoTier.FAST` is an integrator-only latency preset, not a first-party GitHub
+Copilot product preference — the SDK does not decide Fast eligibility or apply
+it implicitly.
 
 ```java
 import com.github.copilot.rpc.AutoTier;
@@ -398,7 +441,7 @@ for the lifecycle rules.
 
 Change the Auto routing preference without changing the selected model. The runtime does not apply the preference immediately: it records the request and commits it only when a later user turn using the `auto` model successfully obtains a usable model from the provider, so a `pending` status confirms acceptance rather than effect. Only the most recent request survives.
 
-Watch for the outcome through the `session.model_change` event on success or the ephemeral `session.auto_tier_switch_failed` event on failure. Read the authoritative committed, pending, and activating preferences at any time through the session's `model.getCurrent` RPC method.
+Watch for the outcome through the `session.model_change` event on success or the ephemeral `session.auto_tier_switch_failed` event on failure. A failed activation leaves the incumbent effective tier unchanged. Read the authoritative committed, pending, and activating preferences at any time through the session's `model.getCurrent` RPC method.
 
 ```java
 var result = session.setAutoTier(AutoTier.INTELLIGENCE).get();
@@ -606,7 +649,7 @@ CI enforces both checks. Spotless runs explicitly in CI; `mvn verify` alone does
 
 Run native-runtime Maven commands from the `java` directory. Native packaging requires Node.js in addition to JDK 25 and Maven because `copilot-native/scripts/fetch-native.mjs` retrieves the pinned runtime package from the corresponding GitHub release.
 
-On a native Linux glibc host, Maven activates `native-linux-x64` or `native-linux-arm64` for the matching architecture when `copilot.native.libc=glibc` is set. On Windows x64, Windows ARM64, and Apple Silicon macOS, Maven activates `native-win32-x64`, `native-win32-arm64`, or `native-darwin-arm64` automatically. The matching profile validates the host, runs the native script tests, fetches the pinned platform package from the corresponding `github/copilot-cli` release during `generate-resources`, packages the classifier JAR during `package`, and verifies its native contents.
+On a native Linux glibc host, Maven activates `native-linux-x64` or `native-linux-arm64` for the matching architecture when `copilot.native.libc=glibc` is set. On a Linux musl x64 host, Maven activates `native-linuxmusl-x64` when `copilot.native.libc=musl` is set. On Windows x64, Windows ARM64, Intel macOS, and Apple Silicon macOS, Maven activates `native-win32-x64`, `native-win32-arm64`, `native-darwin-x64`, or `native-darwin-arm64` automatically. The matching profile validates the host, runs the native script tests, fetches the pinned platform package from the corresponding `github/copilot-cli` release during `generate-resources`, packages the classifier JAR during `package`, and verifies its native contents.
 
 Before opting in, validate that Node.js reports glibc for the build host:
 
@@ -627,10 +670,10 @@ On Windows x64 or ARM64 PowerShell, initialize Java and run the same profile:
 mvn -Pinprocess clean verify
 ```
 
-The same command validates in-process mode on Apple Silicon macOS:
+The same command validates in-process mode on macOS; use the classifier for the host architecture:
 
 ```bash
-node copilot-native/scripts/validate-native-host.mjs darwin-arm64
+node copilot-native/scripts/validate-native-host.mjs darwin-x64 # Use darwin-arm64 on Apple Silicon
 mvn -Pinprocess clean verify
 ```
 
@@ -641,7 +684,14 @@ node copilot-native/scripts/validate-native-host.mjs linux-arm64
 mvn -Pinprocess clean verify -Dcopilot.native.libc=glibc
 ```
 
-On Intel macOS, Linux musl, and other unsupported hosts, do not set `copilot.native.libc=glibc`. A normal build produces only the OS-neutral primary, sources, and Javadoc JARs; it does not run native script tests, download or stage native files, or produce a platform classifier JAR.
+The same command validates in-process mode on Linux musl x64:
+
+```bash
+node copilot-native/scripts/validate-native-host.mjs linuxmusl-x64
+mvn -Pinprocess clean verify -Dcopilot.native.libc=musl
+```
+
+On Linux musl ARM64 and other unsupported hosts, do not set `copilot.native.libc`. A normal build produces only the OS-neutral primary, sources, and Javadoc JARs; it does not run native script tests, download or stage native files, or produce a platform classifier JAR.
 
 To build only the OS-neutral artifacts on any host, or override the glibc opt-in, disable native download and packaging:
 

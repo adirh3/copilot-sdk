@@ -44,9 +44,11 @@ public class CloneTests
             => throw new NotSupportedException();
     }
 
+#pragma warning disable GHCP001
     [Fact]
     public void CopilotClientOptions_Clone_CopiesAllProperties()
     {
+        var extensionLaunchProvider = new TestExtensionLaunchProvider();
         var original = new CopilotClientOptions
         {
             Connection = RuntimeConnection.ForTcp(port: 8080, connectionToken: "tok", path: "/usr/bin/copilot", args: ["--verbose", "--debug"]),
@@ -59,6 +61,7 @@ public class CloneTests
             BuiltinPluginDirectories = ["/plugins/core", "/plugins/github"],
             EnableRemoteSessions = true,
             SessionIdleTimeoutSeconds = 600,
+            ExtensionLaunchProvider = extensionLaunchProvider,
             ClientInfo = new CopilotClientInfo
             {
                 ApplicationName = "example-app",
@@ -81,8 +84,10 @@ public class CloneTests
         Assert.NotSame(original.BuiltinPluginDirectories, clone.BuiltinPluginDirectories);
         Assert.Equal(original.EnableRemoteSessions, clone.EnableRemoteSessions);
         Assert.Equal(original.SessionIdleTimeoutSeconds, clone.SessionIdleTimeoutSeconds);
+        Assert.Same(extensionLaunchProvider, clone.ExtensionLaunchProvider);
         Assert.Same(original.ClientInfo, clone.ClientInfo);
     }
+#pragma warning restore GHCP001
 
     [Fact]
     public void CopilotClientOptions_Clone_ConnectionIsShared()
@@ -104,6 +109,14 @@ public class CloneTests
         var clone = original.Clone();
 
         Assert.Same(original.Environment, clone.Environment);
+    }
+
+    private sealed class TestExtensionLaunchProvider : GitHub.Copilot.Rpc.IExtensionLaunchProviderHandler
+    {
+        public Task<GitHub.Copilot.Rpc.ExtensionLaunchProviderResolveResult> ResolveAsync(
+            GitHub.Copilot.Rpc.ExtensionLaunchProviderResolveRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new GitHub.Copilot.Rpc.ExtensionLaunchProviderResolveResult());
     }
 
     [Fact]

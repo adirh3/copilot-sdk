@@ -21,6 +21,10 @@ release's `SHA256SUMS.txt`.
 
 `npm run pack:release` builds the main package and all platform packages. Set
 `COPILOT_CLI_DOWNLOAD_BASE_URL` to use a release mirror while packaging.
+Release workflows instead set `COPILOT_SDK_RUNTIME_PACKAGE_DIR` to a directory
+containing validated runtime npm package roots named for all eight platforms.
+This keeps `COPILOT_CLI_USE_NPM_PACKAGE` false and embeds those runtime files in
+the self-contained SDK platform packages.
 
 ## Installation
 
@@ -114,6 +118,7 @@ new CopilotClient(options?: CopilotClientOptions)
 - `mode?: "empty" | "copilot-cli"` - Defaulting strategy. Use `"empty"` for multi-user server mode; defaults to `"copilot-cli"`.
 - `workingDirectory?: string` - Working directory for the runtime process (default: current process cwd).
 - `baseDirectory?: string` - Base directory for Copilot data (session state, config, etc.). Sets `COPILOT_HOME` on the spawned runtime. When not set, the runtime defaults to `~/.copilot`. Ignored when connecting via `RuntimeConnection.forUri`.
+- `extensionLaunchProvider?: ExtensionLaunchProvider` - Experimental connection-level resolver for extension launch profiles. The client installs the reverse-RPC handler and registers the provider during startup before sessions can be created.
 - `logLevel?: "none" | "error" | "warning" | "info" | "debug" | "all"` - Log level. When omitted, the runtime uses its own default (currently `"info"`).
 - `env?: Record<string, string | undefined>` - Environment variables for the runtime process. When omitted, inherits `process.env`.
 - `gitHubToken?: string` - GitHub token for authentication. When provided, takes priority over other auth methods.
@@ -147,7 +152,7 @@ Create a new conversation session.
 
 - `sessionId?: string` - Custom session ID.
 - `model?: string` - Model to use ("gpt-5", "claude-sonnet-4.5", etc.). **Required when using custom provider.**
-- `capi?: CapiSessionOptions` - Copilot API options. With `model: "auto"`, set `autoTier` to `"efficiency"`, `"balance"`, or `"intelligence"` to choose a routing preference. Requires a runtime with Auto tier support and V2 Auto routing. Omission preserves default behavior. See [Auto tier persistence](../docs/features/session-persistence.md#auto-tier-persistence) for resume semantics.
+- `capi?: CapiSessionOptions` - Copilot API options. With `model: "auto"`, set `autoTier` to `"efficiency"`, `"balance"`, `"intelligence"`, or `"fast"` to choose a routing preference. `"fast"` is an integrator-only latency preset, not a first-party GitHub Copilot product preference. Requires a runtime with Auto tier support and V2 Auto routing. Omission preserves default behavior. See [Auto tier persistence](../docs/features/session-persistence.md#auto-tier-persistence) for resume semantics.
 - `reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max"` - Reasoning effort level for models that support it. Use `listModels()` to check which models support this option.
 - `tools?: Tool[]` - Custom tools exposed to the CLI. Tools without `handler` are declaration-only and must be resolved via pending tool-call RPCs.
 - `systemMessage?: SystemMessageConfig` - System message customization (see below)
@@ -301,6 +306,87 @@ Send a message and wait until the session becomes idle.
 
 Returns the final assistant message event, or undefined if none was received.
 
+##### Structured output (preview)
+
+Requires a runtime build with `responseFormat` and `originatingMessageId` support.
+Pass a raw JSON Schema or a Zod schema as `responseSchema` to `send` or
+`sendAndWait`. As with custom tool parameters, the SDK converts Zod schemas to
+JSON Schema before sending them:
+
+```typescript
+import { z } from "zod";
+
+const answerSchema = z.object({ answer: z.number().int() });
+const message = await session.sendAndWait({
+    prompt: "What is 19 + 23?",
+    responseSchema: answerSchema,
+});
+console.log(message?.data.content); // JSON text
+```
+
+For a typed result, pass the Zod schema as the **second argument** instead:
+
+```typescript
+const answer = await session.sendAndWait("What is 19 + 23?", answerSchema);
+console.log(answer.answer); // number; TResult is inferred from answerSchema
+```
+
+`sendAndWait<TResult>(options, schema, timeout?)` generates the JSON Schema from
+the schema value, parses the final JSON, and validates it with the schema's
+`parse` method. TypeScript cannot derive a runtime schema from an erased type
+parameter alone. Invalid JSON, a schema mismatch, or a completed run without a
+matching assistant message throws. Do not also set `options.responseSchema` when
+using the typed overload.
+
+The schema belongs to the submitted run, including its tool-call iterations.
+Internally generated stop-hook corrections retain the schema and originating
+message ID, so the wait returns the corrected answer. Independent subsequent
+sends do not inherit it. Ordinary immediate steering inherits the active schema
+and originating message ID, even when it arrives too late for the current model
+request and is promoted into a follow-up run. Specifying a schema with
+`mode: "immediate"` is rejected, even while idle.
+The generated `session.rpc.send` and `session.rpc.sendMessages` wrappers expose
+the full `responseFormat` contract when you need to set its name, description,
+or strict option rather than using the convenience defaults (`name: "response"`,
+`strict: true`).
+Each batch starts one run: the final returned message ID is its origin, preceding
+messages are context, and an empty batch has no origin. An immediate batch
+steers the active run instead and retains its origin.
+The schema is not a persisted session default: autonomous resume-pending work
+after a restart does not restore it. A terminal tool that clears context ends
+the old run; its fresh seed does not inherit the schema or origin. Such a run
+can finish without a structured result, in which case the typed wait throws.
+After a successful terminal tool, the runtime disables tools while the model
+produces the structured result. Stop-hook corrections remain supported.
+Remote sessions and known HydraFusion routes reject response formats before
+admission. Schemas larger than 32 MiB when JSON-encoded are also rejected before
+admission, using the runtime's existing request-size ceiling. This does not
+guarantee the schema plus conversation and tools fits the provider's budget.
+
+Structured waits select the last root-agent message whose `originatingMessageId`
+matches the ID returned by their send, then return at a non-autopilot
+`session.idle`. Other queued work can delay that idle, but cannot replace the
+selected result. The existing unformatted overload retains its session-wide
+behavior. `turnId` identifies an individual model/tool iteration, not the whole
+run; telemetry interaction IDs are not unique run identifiers.
+
+For event-driven consumption with `send`, subscribe before sending and collect
+root `assistant.message` events whose `data.originatingMessageId` matches the ID
+returned by `send`; events may arrive before that acknowledgement. Wait for
+`session.idle`, then parse the last matching message without tool requests.
+An earlier response may be superseded by a stop-hook correction. Handle
+`session.error` and aborted idle events rather than returning a partial result.
+
+Streaming still delivers ordinary text events, including intermediate messages
+and tool calls. Only the final selected message is parsed by the typed overload;
+not every event is necessarily a complete schema-conforming JSON document.
+Provider errors, refusals, cancellation, truncation, session errors, and timeouts
+can prevent a typed result. A timeout stops waiting, not the runtime's work.
+Use a model and endpoint that support native structured output. An API-compatible
+gateway may ignore format fields even when it accepts the request; for example,
+the Claude Chat-completions compatibility route is not equivalent to Anthropic's
+native `output_config.format` endpoint.
+
 ##### `on(eventType: string, handler: TypedSessionEventHandler): () => void`
 
 Subscribe to a specific event type. The handler receives properly typed events.
@@ -350,7 +436,7 @@ Change the Auto routing preference without changing the selected model. Pass `nu
 
 The runtime does not apply the preference immediately. It records the request and commits it only when a later user turn using the `auto` model successfully obtains a usable model from the provider, so a `pending` status confirms acceptance rather than effect. Only the most recent request survives.
 
-Watch for the outcome through the `session.model_change` event on success or the ephemeral `session.auto_tier_switch_failed` event on failure, and read the authoritative state at any time with `session.rpc.model.getCurrent()`.
+Watch for the outcome through the `session.model_change` event on success or the ephemeral `session.auto_tier_switch_failed` event on failure. A failed activation leaves the incumbent effective tier unchanged. Read the authoritative state at any time with `session.rpc.model.getCurrent()`.
 
 ```typescript
 const result = await session.setAutoTier("intelligence");
