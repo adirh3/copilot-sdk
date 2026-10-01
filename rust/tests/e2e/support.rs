@@ -3,6 +3,8 @@ use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::ops::Deref;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -337,28 +339,6 @@ pub async fn with_dedicated_group_e2e_context<F>(
     with_dedicated_e2e_context(category, snapshot_name, test).await;
 }
 
-pub async fn skip_shared_e2e_inprocess(group: &'static SharedE2eGroup, reason: &str) -> bool {
-    if !skip_inprocess(reason) {
-        return false;
-    }
-
-    let mut state = group.state.lock().await;
-    let _permit = E2E_CONCURRENCY
-        .acquire()
-        .await
-        .expect("E2E concurrency semaphore should stay open");
-    let completed = group.completed_invocations.fetch_add(1, Ordering::Relaxed) + 1;
-    if completed == group.expected_invocations
-        && let Some(state) = state.take()
-    {
-        state
-            .shutdown_bounded(false)
-            .await
-            .unwrap_or_else(|error| panic!("tear down shared E2E group after skip: {error}"));
-    }
-    true
-}
-
 /// Run a dedicated one-client E2E test.
 ///
 /// New tests should call [`with_dedicated_e2e_context`] to make the lifecycle
@@ -423,8 +403,19 @@ pub struct E2eContext {
 
 impl E2eContext {
     async fn new(category: &str, snapshot_name: &str) -> std::io::Result<Self> {
+        Self::new_with_cli(category, snapshot_name, None).await
+    }
+
+    pub async fn new_with_cli(
+        category: &str,
+        snapshot_name: &str,
+        cli_override: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
         let repo_root = repo_root();
-        let cli_path = cli_path(&repo_root)?;
+        let cli_path = match cli_override {
+            Some(path) => path,
+            None => cli_path(&repo_root)?,
+        };
         let home_dir = tempfile::tempdir()?;
         let work_dir = tempfile::tempdir()?;
         let proxy_root = repo_root.clone();
@@ -481,6 +472,11 @@ impl E2eContext {
         self.work_dir.path()
     }
 
+    /// The runtime's `COPILOT_HOME`, which holds `session-state/`.
+    pub fn home_dir(&self) -> &Path {
+        self.home_dir.path()
+    }
+
     pub fn proxy_url(&self) -> &str {
         self.proxy().url()
     }
@@ -513,7 +509,7 @@ impl E2eContext {
 
     /// Start a client that hosts the bundled runtime directly in-process over
     /// FFI ([`Transport::InProcess`]).
-    #[cfg_attr(not(feature = "bundled-in-process"), allow(dead_code))]
+    #[cfg_attr(not(feature = "in-process"), allow(dead_code))]
     pub async fn start_inprocess_client(&self) -> Client {
         let options = ClientOptions::new().with_transport(Transport::InProcess);
         Client::start(options)
@@ -575,6 +571,7 @@ impl E2eContext {
     ) {
         let mut user = json!({
             "login": login,
+            "id": 12345,
             "copilot_plan": "individual_pro",
             "endpoints": {
                 "api": self.proxy_url(),
@@ -1070,6 +1067,44 @@ struct InProcessEnvGuard {
     previous_cwd: PathBuf,
 }
 
+pub struct InProcessHostGuard {
+    saved: [(OsString, Option<OsString>); 2],
+}
+
+pub fn set_inprocess_host_for_test(
+    copilot_host: &str,
+    gh_host: &str,
+) -> Option<InProcessHostGuard> {
+    if !is_inprocess_default() {
+        return None;
+    }
+    let saved = [
+        (
+            "COPILOT_GH_HOST".into(),
+            std::env::var_os("COPILOT_GH_HOST"),
+        ),
+        ("GH_HOST".into(), std::env::var_os("GH_HOST")),
+    ];
+    // SAFETY: in-process E2E tests hold the suite's single concurrency permit.
+    unsafe {
+        std::env::set_var("COPILOT_GH_HOST", copilot_host);
+        std::env::set_var("GH_HOST", gh_host);
+    }
+    Some(InProcessHostGuard { saved })
+}
+
+impl Drop for InProcessHostGuard {
+    fn drop(&mut self) {
+        for (key, previous) in &self.saved {
+            // SAFETY: this guard is dropped before releasing the in-process permit.
+            match previous {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+}
+
 impl InProcessEnvGuard {
     /// Returns `Some` guard (having applied the env) when in-process, else `None`.
     fn activate(ctx: &E2eContext) -> Option<Self> {
@@ -1266,14 +1301,20 @@ struct CapiProxy {
 
 impl CapiProxy {
     fn start(repo_root: &Path) -> std::io::Result<Self> {
-        let mut child = Command::new(npx_program())
-            .args(["tsx", "server.ts"])
+        let mut command = Command::new(node_program());
+        command
+            .args(["--import", "tsx", "server.ts"])
             .current_dir(repo_root.join("test").join("harness"))
             .env("GITHUB_ACTIONS", "true")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command.spawn()?;
 
         let stdout = child.stdout.take().expect("proxy stdout");
         let (line_tx, line_rx) = std::sync::mpsc::channel();
@@ -1528,10 +1569,6 @@ fn parse_http_url(url: &str) -> std::io::Result<(String, u16)> {
 
 fn node_program() -> &'static str {
     if cfg!(windows) { "node.exe" } else { "node" }
-}
-
-fn npx_program() -> &'static str {
-    if cfg!(windows) { "npx.cmd" } else { "npx" }
 }
 
 #[test]

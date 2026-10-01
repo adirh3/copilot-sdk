@@ -58,10 +58,15 @@ public sealed partial class ClientSessionLifetimeTests
             ]
         };
 
-        await using var session = await OpenSessionWithSkillsAsync(client, resume, provider);
+        await using var session = await OpenSessionWithSkillsAsync(
+            client, resume, provider, allowTranscriptRecovery: true);
 
         var request = Assert.Single(server.Requests, request => request.Method == (resume ? "session.resume" : "session.create"));
         Assert.True(request.Params.GetProperty("hasSkillProvider").GetBoolean());
+        if (resume)
+        {
+            Assert.True(request.Params.GetProperty("allowTranscriptRecovery").GetBoolean());
+        }
         Assert.False(request.Params.TryGetProperty("skillProvider", out _));
         Assert.False(request.Params.TryGetProperty("skillDirectories", out _));
         Assert.False(request.Params.TryGetProperty("tools", out _));
@@ -89,7 +94,7 @@ public sealed partial class ClientSessionLifetimeTests
         Assert.Equal("native-skill", provider.LastReadName);
         Assert.Equal(1, provider.ReadCalls);
         Assert.True(provider.ListCancellationToken.CanBeCanceled);
-        Assert.Equal(provider.ListCancellationToken, provider.ReadCancellationToken);
+        Assert.True(provider.ReadCancellationToken.CanBeCanceled);
     }
 
     [Theory]
@@ -241,24 +246,36 @@ public sealed partial class ClientSessionLifetimeTests
         Assert.Contains("skill provider failed", error.Message);
     }
 
-    [Fact]
-    public async Task SkillProvider_Receives_The_Rpc_Lifetime_Cancellation_Token()
+    [Theory]
+    [InlineData("skillProvider.list")]
+    [InlineData("skillProvider.read")]
+    public async Task SkillProvider_Pending_Callback_Is_Cancelled_When_Connection_Closes(string method)
     {
-        await using var server = await FakeCopilotServer.StartAsync();
-        await using var client = new CopilotClient(new CopilotClientOptions { Connection = RuntimeConnection.ForUri(server.Url) });
-        var provider = new TestSkillProvider();
-        await using var session = await client.CreateSessionAsync(new SessionConfig { SkillProvider = provider });
-        await server.SendRequestAsync("skillProvider.list", SkillRequest(session.SessionId));
-        await server.SendRequestAsync("skillProvider.read", SkillRequest(session.SessionId));
-        Assert.True(provider.ListCancellationToken.CanBeCanceled);
-        Assert.True(provider.ReadCancellationToken.CanBeCanceled);
-        Assert.False(provider.ListCancellationToken.IsCancellationRequested);
-        Assert.False(provider.ReadCancellationToken.IsCancellationRequested);
+        var server = await FakeCopilotServer.StartAsync();
+        Task<JsonElement>? callback = null;
+        try
+        {
+            await using var client = new CopilotClient(new CopilotClientOptions { Connection = RuntimeConnection.ForUri(server.Url) });
+            var provider = new BlockingSkillProvider();
+            await using var session = await client.CreateSessionAsync(new SessionConfig { SkillProvider = provider });
+            callback = server.SendRequestAsync(method, SkillRequest(session.SessionId));
+            var token = await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(token.CanBeCanceled);
+            Assert.False(token.IsCancellationRequested);
 
-        await client.ForceStopAsync();
+            await client.ForceStopAsync();
 
-        Assert.True(provider.ListCancellationToken.IsCancellationRequested);
-        Assert.True(provider.ReadCancellationToken.IsCancellationRequested);
+            await provider.Finished.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(token.IsCancellationRequested);
+        }
+        finally
+        {
+            await server.DisposeAsync();
+            if (callback is not null)
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => callback);
+            }
+        }
     }
 
     [Theory]
@@ -282,12 +299,14 @@ public sealed partial class ClientSessionLifetimeTests
     }
 
     private static Task<CopilotSession> OpenSessionWithSkillsAsync(
-        CopilotClient client, bool resume, SkillProvider? provider, bool? enableSkills = null)
+        CopilotClient client, bool resume, SkillProvider? provider,
+        bool? enableSkills = null, bool? allowTranscriptRecovery = null)
         => resume
             ? client.ResumeSessionAsync("resumed-skill-session", new ResumeSessionConfig
             {
                 SkillProvider = provider,
-                EnableSkills = enableSkills
+                EnableSkills = enableSkills,
+                AllowTranscriptRecovery = allowTranscriptRecovery
             })
             : client.CreateSessionAsync(new SessionConfig
             {
@@ -297,6 +316,37 @@ public sealed partial class ClientSessionLifetimeTests
 
     private static Dictionary<string, object?> SkillRequest(string sessionId)
         => new() { ["sessionId"] = sessionId, ["name"] = "native-skill" };
+
+    private sealed class BlockingSkillProvider : SkillProvider
+    {
+        public TaskCompletionSource<CancellationToken> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task<IReadOnlyList<SkillProviderDescriptor>> ListAsync(CancellationToken cancellationToken = default)
+        {
+            await WaitForCancellationAsync(cancellationToken);
+            return [];
+        }
+
+        public override async Task<string> ReadAsync(string name, CancellationToken cancellationToken = default)
+        {
+            await WaitForCancellationAsync(cancellationToken);
+            return "";
+        }
+
+        private async Task WaitForCancellationAsync(CancellationToken cancellationToken)
+        {
+            Started.TrySetResult(cancellationToken);
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            finally
+            {
+                Finished.TrySetResult();
+            }
+        }
+    }
 
     private sealed class TestSkillProvider : SkillProvider
     {

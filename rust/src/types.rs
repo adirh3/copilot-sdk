@@ -21,6 +21,10 @@ pub use crate::copilot_request_handler::{
     CopilotWebSocketResponse, WebSocketTransform, forward_http,
 };
 use crate::generated::api_types::{CurrentToolMetadata, OpenCanvasInstance};
+pub use crate::generated::api_types::{
+    DiagnosticLogLevel, DiagnosticSourcesConfiguration, DiagnosticsConfiguration,
+    McpDiagnosticSourceConfiguration,
+};
 /// Acknowledgement and Auto preference snapshot returned by an Auto tier switch.
 pub use crate::generated::api_types::{ModelSwitchAutoTierResult, ModelSwitchAutoTierStatus};
 /// Routing tier for the `auto` model with Auto mode V2.
@@ -2010,6 +2014,11 @@ pub struct SessionConfig {
     pub included_builtin_skills: Option<Vec<String>>,
     /// MCP server configurations passed through to the CLI.
     pub mcp_servers: Option<IndexMap<String, McpServerConfig>>,
+    /// Enables session-scoped MCP diagnostic capture. Diagnostics are off by
+    /// default. Debug and trace entries can contain MCP payloads, tool arguments,
+    /// paths, and server stderr, so hosts must not upload or export them
+    /// automatically.
+    pub diagnostics: Option<DiagnosticsConfiguration>,
     /// Controls how MCP OAuth tokens are stored for this session.
     ///
     /// - `"persistent"` — tokens are stored in the OS keychain (shared across sessions).
@@ -2036,6 +2045,13 @@ pub struct SessionConfig {
     pub embedding_cache_storage: Option<String>,
     /// Organization-level custom instructions to apply to this session.
     pub organization_custom_instructions: Option<String>,
+    /// Invalidate the runtime process-wide instruction discovery cache before
+    /// constructing this new session. `None` or `Some(false)` retains cache reuse.
+    ///
+    /// Available only on creation configs, not resume configs. Other sessions in
+    /// this runtime may observe updated instructions on later turns or discovery.
+    /// This does not watch files or override instruction-loading policy.
+    pub refresh_custom_instructions: Option<bool>,
     /// When true, enables on-demand instruction discovery for this session.
     pub enable_on_demand_instruction_discovery: Option<bool>,
     /// When true, enables file hooks for this session.
@@ -2334,6 +2350,7 @@ impl std::fmt::Debug for SessionConfig {
             .field("excluded_builtin_agents", &self.excluded_builtin_agents)
             .field("included_builtin_skills", &self.included_builtin_skills)
             .field("mcp_servers", &self.mcp_servers)
+            .field("diagnostics", &self.diagnostics)
             .field("mcp_oauth_token_storage", &self.mcp_oauth_token_storage)
             .field(
                 "auth_client_id_metadata_url",
@@ -2348,6 +2365,10 @@ impl std::fmt::Debug for SessionConfig {
                     .organization_custom_instructions
                     .as_ref()
                     .map(|_| "<redacted>"),
+            )
+            .field(
+                "refresh_custom_instructions",
+                &self.refresh_custom_instructions,
             )
             .field(
                 "enable_on_demand_instruction_discovery",
@@ -2479,11 +2500,13 @@ impl Default for SessionConfig {
             excluded_builtin_agents: None,
             included_builtin_skills: None,
             mcp_servers: None,
+            diagnostics: None,
             mcp_oauth_token_storage: None,
             auth_client_id_metadata_url: None,
             enable_config_discovery: None,
             skip_embedding_retrieval: None,
             organization_custom_instructions: None,
+            refresh_custom_instructions: None,
             enable_on_demand_instruction_discovery: None,
             enable_file_hooks: None,
             enable_host_git_operations: None,
@@ -2650,6 +2673,7 @@ impl SessionConfig {
             excluded_builtin_agents: self.excluded_builtin_agents,
             tool_filter_precedence: "excluded",
             mcp_servers: self.mcp_servers,
+            diagnostics: self.diagnostics,
             mcp_oauth_token_storage: self.mcp_oauth_token_storage,
             auth_client_id_metadata_url: self.auth_client_id_metadata_url,
             embedding_cache_storage: self.embedding_cache_storage,
@@ -2657,6 +2681,7 @@ impl SessionConfig {
             enable_config_discovery: self.enable_config_discovery,
             skip_embedding_retrieval: self.skip_embedding_retrieval,
             organization_custom_instructions: self.organization_custom_instructions,
+            refresh_custom_instructions: self.refresh_custom_instructions,
             enable_on_demand_instruction_discovery: self.enable_on_demand_instruction_discovery,
             enable_file_hooks: self.enable_file_hooks,
             enable_host_git_operations: self.enable_host_git_operations,
@@ -2994,6 +3019,12 @@ impl SessionConfig {
         self
     }
 
+    /// Set the session-scoped MCP diagnostic level.
+    pub fn with_diagnostics(mut self, diagnostics: DiagnosticsConfiguration) -> Self {
+        self.diagnostics = Some(diagnostics);
+        self
+    }
+
     /// Set MCP OAuth token storage mode.
     ///
     /// - `"persistent"` — tokens stored in the OS keychain.
@@ -3040,6 +3071,12 @@ impl SessionConfig {
         instructions: impl Into<String>,
     ) -> Self {
         self.organization_custom_instructions = Some(instructions.into());
+        self
+    }
+
+    /// Set [`Self::refresh_custom_instructions`] for this new session.
+    pub fn with_refresh_custom_instructions(mut self, refresh: bool) -> Self {
+        self.refresh_custom_instructions = Some(refresh);
         self
     }
 
@@ -3490,6 +3527,9 @@ pub struct ResumeSessionConfig {
     pub included_builtin_skills: Option<Vec<String>>,
     /// Re-supply MCP servers so they remain available after app restart.
     pub mcp_servers: Option<IndexMap<String, McpServerConfig>>,
+    /// Updates session-scoped MCP diagnostics. Leave this unset on a resident
+    /// resume to preserve the current diagnostic level.
+    pub diagnostics: Option<DiagnosticsConfiguration>,
     /// Controls how MCP OAuth tokens are stored for this session.
     /// See [`SessionConfig::mcp_oauth_token_storage`] for details.
     pub mcp_oauth_token_storage: Option<String>,
@@ -3653,9 +3693,15 @@ pub struct ResumeSessionConfig {
     /// was dropped. Use this together with [`Client::force_stop`] to hand
     /// off a session from one process to another without losing in-flight
     /// work.
+    /// When omitted or `false` (the default), work still pending on resume
+    /// is treated as interrupted; completed tool results already recorded by
+    /// the runtime are preserved.
     ///
     /// [`Client::force_stop`]: crate::Client::force_stop
     pub continue_pending_work: Option<bool>,
+    /// Permit recovery of a damaged transcript on resume. Defaults to `true`
+    /// in all modes when unset. Set `false` to reject recovery.
+    pub allow_transcript_recovery: Option<bool>,
     /// Optional permission-request handler. See
     /// [`SessionConfig::permission_handler`].
     pub permission_handler: Option<Arc<dyn PermissionHandler>>,
@@ -3726,6 +3772,7 @@ impl std::fmt::Debug for ResumeSessionConfig {
             .field("excluded_builtin_agents", &self.excluded_builtin_agents)
             .field("included_builtin_skills", &self.included_builtin_skills)
             .field("mcp_servers", &self.mcp_servers)
+            .field("diagnostics", &self.diagnostics)
             .field("mcp_oauth_token_storage", &self.mcp_oauth_token_storage)
             .field(
                 "auth_client_id_metadata_url",
@@ -3913,6 +3960,7 @@ impl ResumeSessionConfig {
             excluded_builtin_agents: self.excluded_builtin_agents,
             tool_filter_precedence: "excluded",
             mcp_servers: self.mcp_servers,
+            diagnostics: self.diagnostics,
             mcp_oauth_token_storage: self.mcp_oauth_token_storage,
             auth_client_id_metadata_url: self.auth_client_id_metadata_url,
             embedding_cache_storage: self.embedding_cache_storage,
@@ -3971,6 +4019,7 @@ impl ResumeSessionConfig {
             managed_settings: self.managed_settings,
             suppress_resume_event: self.suppress_resume_event,
             continue_pending_work: self.continue_pending_work,
+            allow_transcript_recovery: self.allow_transcript_recovery,
         };
 
         let runtime = SessionConfigRuntime {
@@ -4024,6 +4073,7 @@ impl ResumeSessionConfig {
             excluded_builtin_agents: None,
             included_builtin_skills: None,
             mcp_servers: None,
+            diagnostics: None,
             mcp_oauth_token_storage: None,
             auth_client_id_metadata_url: None,
             enable_config_discovery: None,
@@ -4074,6 +4124,7 @@ impl ResumeSessionConfig {
             session_fs_provider: None,
             suppress_resume_event: None,
             continue_pending_work: None,
+            allow_transcript_recovery: None,
             permission_handler: None,
             elicitation_handler: None,
             mcp_auth_handler: None,
@@ -4342,6 +4393,12 @@ impl ResumeSessionConfig {
     /// Re-supply MCP server configurations on resume.
     pub fn with_mcp_servers(mut self, servers: IndexMap<String, McpServerConfig>) -> Self {
         self.mcp_servers = Some(servers);
+        self
+    }
+
+    /// Set the session-scoped MCP diagnostic level on resume.
+    pub fn with_diagnostics(mut self, diagnostics: DiagnosticsConfiguration) -> Self {
+        self.diagnostics = Some(diagnostics);
         self
     }
 
@@ -4678,8 +4735,16 @@ impl ResumeSessionConfig {
     /// was dropped. Use this together with
     /// [`Client::force_stop`](crate::Client::force_stop) to hand off a
     /// session from one process to another without losing in-flight work.
+    /// When `false` (the default), pending work is treated as interrupted on
+    /// resume; already-recorded tool results are preserved.
     pub fn with_continue_pending_work(mut self, continue_pending: bool) -> Self {
         self.continue_pending_work = Some(continue_pending);
+        self
+    }
+
+    /// Set [`Self::allow_transcript_recovery`].
+    pub fn with_allow_transcript_recovery(mut self, allow: bool) -> Self {
+        self.allow_transcript_recovery = Some(allow);
         self
     }
 
@@ -4838,6 +4903,18 @@ pub struct CreateSessionResult {
     pub capabilities: Option<SessionCapabilities>,
 }
 
+/// Details of transcript repair planned during resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptRecovery {
+    /// Planned backup path; the backup is written on the next append.
+    pub planned_backup_path: String,
+    /// One-based physical line numbers removed from the transcript.
+    pub invalid_line_numbers: Vec<u32>,
+    /// Whether a valid session.start event was moved to the beginning.
+    pub session_start_moved: bool,
+}
+
 /// Response from `session.resume`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4861,6 +4938,9 @@ pub(crate) struct ResumeSessionResult {
         skip_serializing_if = "Option::is_none"
     )]
     pub open_canvases: Option<Vec<OpenCanvasInstance>>,
+    /// Recovery performed in memory while loading the session.
+    #[serde(default)]
+    pub transcript_recovery: Option<TranscriptRecovery>,
 }
 
 /// Severity level for [`Session::log`](crate::session::Session::log) messages.
@@ -7439,6 +7519,38 @@ mod tests {
     }
 
     #[test]
+    fn resume_policy_and_recovery_report_round_trip() {
+        let config = ResumeSessionConfig::new(SessionId::from("sess-1"))
+            .with_allow_transcript_recovery(false);
+        let (wire, _) = config.into_wire().unwrap();
+        let value = serde_json::to_value(&wire).unwrap();
+        assert_eq!(value["allowTranscriptRecovery"], false);
+
+        let (wire, _) = ResumeSessionConfig::new(SessionId::from("sess-2"))
+            .into_wire()
+            .unwrap();
+        assert!(
+            serde_json::to_value(&wire)
+                .unwrap()
+                .get("allowTranscriptRecovery")
+                .is_none()
+        );
+
+        let result: crate::types::ResumeSessionResult = serde_json::from_value(serde_json::json!({
+            "sessionId": "sess-1",
+            "transcriptRecovery": {
+                "plannedBackupPath": "events.jsonl.backup",
+                "invalidLineNumbers": [2],
+                "sessionStartMoved": false
+            }
+        }))
+        .unwrap();
+        let recovery = result.transcript_recovery.unwrap();
+        assert_eq!(recovery.invalid_line_numbers, vec![2]);
+        assert_eq!(recovery.planned_backup_path, "events.jsonl.backup");
+    }
+
+    #[test]
     fn session_configs_serialize_additional_directories() {
         let create = SessionConfig::default().with_additional_directories([
             PathBuf::from("/tmp/shared"),
@@ -8504,3 +8616,6 @@ mod is_terminal_tests {
         assert!(format!("{plain:?}").contains("is_terminal: false"));
     }
 }
+
+#[cfg(test)]
+mod refresh_custom_instructions_tests;

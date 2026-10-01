@@ -16,6 +16,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import com.github.copilot.CopilotExperimental;
 import com.github.copilot.generated.SessionEvent;
+import com.github.copilot.generated.rpc.DiagnosticsConfiguration;
 import com.github.copilot.generated.rpc.SessionLimitsConfig;
 
 /**
@@ -56,6 +57,8 @@ public class ResumeSessionConfig {
     private Boolean enableFileChangeTracking;
     private SessionLimitsConfig sessionLimits;
     private Boolean enableExperimentalMode;
+    private Boolean continuePendingWork;
+    private Boolean allowTranscriptRecovery;
     private Boolean skipCustomInstructions;
     private Boolean customAgentsLocalOnly;
     private Boolean coauthorEnabled;
@@ -85,6 +88,7 @@ public class ResumeSessionConfig {
     private boolean streaming;
     private Boolean includeSubAgentStreamingEvents;
     private Map<String, McpServerConfig> mcpServers;
+    private DiagnosticsConfiguration diagnostics;
     private String mcpOAuthTokenStorage;
     private String authClientIdMetadataUrl;
     private List<CustomAgentConfig> customAgents;
@@ -136,6 +140,72 @@ public class ResumeSessionConfig {
      */
     public ResumeSessionConfig setModel(String model) {
         this.model = model;
+        return this;
+    }
+
+    /**
+     * Gets whether pending work should continue after resuming the session.
+     *
+     * @return the explicit choice, or empty to use the runtime default
+     */
+    @JsonIgnore
+    public Optional<Boolean> getContinuePendingWork() {
+        return Optional.ofNullable(continuePendingWork);
+    }
+
+    /**
+     * Sets whether to continue pending work when resuming the session.
+     *
+     * @param continuePendingWork
+     *            whether to continue pending work
+     * @return this config for method chaining
+     */
+    public ResumeSessionConfig setContinuePendingWork(boolean continuePendingWork) {
+        this.continuePendingWork = continuePendingWork;
+        return this;
+    }
+
+    /**
+     * Clears the pending-work choice so the runtime default applies.
+     *
+     * @return this config for method chaining
+     */
+    public ResumeSessionConfig clearContinuePendingWork() {
+        this.continuePendingWork = null;
+        return this;
+    }
+
+    /**
+     * Gets the explicit transcript repair choice on resume.
+     *
+     * @return the choice, or empty for the runtime default (true in all modes)
+     */
+    @JsonIgnore
+    public Optional<Boolean> getAllowTranscriptRecovery() {
+        return Optional.ofNullable(allowTranscriptRecovery);
+    }
+
+    /**
+     * Sets whether to repair a damaged transcript on resume. Defaults to true in
+     * all modes. Set false to reject recovery. Recovery can discard a torn tail;
+     * inspect the returned session's report.
+     *
+     * @param allowTranscriptRecovery
+     *            whether repair is allowed
+     * @return this config
+     */
+    public ResumeSessionConfig setAllowTranscriptRecovery(boolean allowTranscriptRecovery) {
+        this.allowTranscriptRecovery = allowTranscriptRecovery;
+        return this;
+    }
+
+    /**
+     * Clears the transcript repair choice so the runtime default (true) applies.
+     *
+     * @return this config for method chaining
+     */
+    public ResumeSessionConfig clearAllowTranscriptRecovery() {
+        this.allowTranscriptRecovery = null;
         return this;
     }
 
@@ -1342,6 +1412,18 @@ public class ResumeSessionConfig {
     }
 
     /**
+     * Controls whether persisted pending work may continue on resume.
+     *
+     * @param continuePendingWork
+     *            explicit setting, or {@code null} for the default
+     * @return this config instance
+     */
+    public ResumeSessionConfig setContinuePendingWork(Boolean continuePendingWork) {
+        this.continuePendingWork = continuePendingWork;
+        return this;
+    }
+
+    /**
      * Sets whether to disable the session.resume event.
      * <p>
      * When true, the session.resume event is not emitted.
@@ -1394,6 +1476,28 @@ public class ResumeSessionConfig {
      */
     public ResumeSessionConfig setMcpServers(Map<String, McpServerConfig> mcpServers) {
         this.mcpServers = mcpServers;
+        return this;
+    }
+
+    /**
+     * Gets the session-scoped diagnostics configuration.
+     *
+     * @return the diagnostic level, or {@code null} to preserve the current level
+     */
+    public DiagnosticsConfiguration getDiagnostics() {
+        return diagnostics;
+    }
+
+    /**
+     * Sets the session-scoped diagnostics configuration. Leave it unset when
+     * resuming a resident session to preserve its current diagnostic level.
+     *
+     * @param diagnostics
+     *            the diagnostic level
+     * @return this config for method chaining
+     */
+    public ResumeSessionConfig setDiagnostics(DiagnosticsConfiguration diagnostics) {
+        this.diagnostics = diagnostics;
         return this;
     }
 
@@ -2117,6 +2221,8 @@ public class ResumeSessionConfig {
         copy.enableFileChangeTracking = this.enableFileChangeTracking;
         copy.sessionLimits = this.sessionLimits;
         copy.enableExperimentalMode = this.enableExperimentalMode;
+        copy.continuePendingWork = this.continuePendingWork;
+        copy.allowTranscriptRecovery = this.allowTranscriptRecovery;
         copy.reasoningEffort = this.reasoningEffort;
         copy.reasoningSummary = this.reasoningSummary;
         copy.contextTier = this.contextTier;
@@ -2143,6 +2249,7 @@ public class ResumeSessionConfig {
         copy.streaming = this.streaming;
         copy.includeSubAgentStreamingEvents = this.includeSubAgentStreamingEvents;
         copy.mcpServers = this.mcpServers != null ? new java.util.HashMap<>(this.mcpServers) : null;
+        copy.diagnostics = this.diagnostics;
         copy.mcpOAuthTokenStorage = this.mcpOAuthTokenStorage;
         copy.authClientIdMetadataUrl = this.authClientIdMetadataUrl;
         copy.customAgents = this.customAgents != null ? new ArrayList<>(this.customAgents) : null;

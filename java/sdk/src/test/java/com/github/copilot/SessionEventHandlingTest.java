@@ -21,6 +21,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -32,6 +33,7 @@ import com.github.copilot.generated.AssistantMessageEvent;
 import com.github.copilot.generated.ExternalToolCompletedEvent;
 import com.github.copilot.generated.ExternalToolRequestedEvent;
 import com.github.copilot.generated.SessionIdleEvent;
+import com.github.copilot.generated.SessionErrorEvent;
 import com.github.copilot.generated.SessionMode;
 import com.github.copilot.generated.SessionStartEvent;
 import com.github.copilot.generated.rpc.SessionToolsGetCurrentMetadataResult;
@@ -82,6 +84,35 @@ public class SessionEventHandlingTest {
         assertInstanceOf(SessionStartEvent.class, receivedEvents.get(0));
         assertInstanceOf(AssistantMessageEvent.class, receivedEvents.get(1));
         assertInstanceOf(SessionIdleEvent.class, receivedEvents.get(2));
+    }
+
+    @Test
+    void testHandlerAddedDuringDispatchStartsWithNextEvent() {
+        var received = new ArrayList<SessionEvent>();
+        // Fixed hashes make the old weakly consistent iterator visit the new handler
+        // after the registering handlers, without relying on scheduling or identity
+        // hashes.
+        record Handler(int hash, Consumer<SessionEvent> callback) implements Consumer<SessionEvent> {
+            @Override
+            public int hashCode() {
+                return hash;
+            }
+
+            @Override
+            public void accept(SessionEvent event) {
+                callback.accept(event);
+            }
+        }
+        var added = new Handler(15, received::add);
+        session.on(new Handler(0, event -> session.on(added)));
+        session.on(new Handler(1, event -> session.on(added)));
+
+        dispatchEvent(createSessionIdleEvent());
+        assertTrue(received.isEmpty(), "A new wait must not receive the idle event already being dispatched");
+
+        var next = createAssistantMessageEvent("HELLO");
+        dispatchEvent(next);
+        assertEquals(List.of(next), received);
     }
 
     @Test
@@ -221,6 +252,41 @@ public class SessionEventHandlingTest {
             var result = pending.get(5, TimeUnit.SECONDS);
             assertNotNull(result);
             assertEquals("final", result.getData().content());
+        } finally {
+            session.close();
+        }
+    }
+
+    @Test
+    void testSendAndWaitIgnoresChildEvents() throws Exception {
+        var rpc = mock(JsonRpcClient.class);
+        when(rpc.invoke(eq("session.send"), any(), eq(SendMessageResponse.class)))
+                .thenReturn(CompletableFuture.completedFuture(new SendMessageResponse("message-1")));
+        when(rpc.invoke(eq("session.detach"), any(), eq(CopilotSession.SessionDetachResponse.class)))
+                .thenReturn(CompletableFuture.completedFuture(new CopilotSession.SessionDetachResponse(true, null)));
+        session = new CopilotSession("test-session-id", rpc);
+
+        try {
+            var received = new ArrayList<SessionEvent>();
+            session.on(received::add);
+            var pending = session.sendAndWait(new MessageOptions().setPrompt("delegate"));
+
+            var childMessage = createAssistantMessageEvent("child reply");
+            childMessage.setAgentId("child-1");
+            dispatchEvent(childMessage);
+            var childError = new SessionErrorEvent();
+            childError.setAgentId("child-1");
+            childError.setData(new SessionErrorEvent.SessionErrorEventData("query", null, null, "child failed", null,
+                    null, null, null, null, null));
+            dispatchEvent(childError);
+            var childIdle = createSessionIdleEvent();
+            childIdle.setAgentId("child-1");
+            dispatchEvent(childIdle);
+            assertEquals(List.of(childMessage, childError, childIdle), received);
+            assertFalse(pending.isDone(), "Child events must not complete the parent wait");
+
+            dispatchEvent(createSessionIdleEvent());
+            assertNull(pending.get(5, TimeUnit.SECONDS), "Child reply must not supply the parent result");
         } finally {
             session.close();
         }

@@ -30,6 +30,7 @@ import com.github.copilot.ffi.NativeRuntimeLoader;
 import com.github.copilot.rpc.CopilotClientMode;
 import com.github.copilot.rpc.CopilotClientOptions;
 import com.github.copilot.rpc.ExtensionLaunchProvider;
+import com.github.copilot.rpc.InstallationConfirmationHandler;
 import com.github.copilot.rpc.InProcessRuntimeConnection;
 import com.github.copilot.rpc.RuntimeConnection;
 import com.github.copilot.rpc.StdioRuntimeConnection;
@@ -92,11 +93,12 @@ public final class CopilotClient implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(CopilotClient.class.getName());
 
     /**
-     * Timeout, in seconds, used by {@link #close()} when waiting for graceful
-     * shutdown via {@link #stop()}.
+     * Timeout, in seconds, allowed by {@link #close()} for session and executor
+     * cleanup, in addition to the bounded runtime shutdown phases.
      */
     public static final int AUTOCLOSEABLE_TIMEOUT_SECONDS = 10;
     private static final int RUNTIME_SHUTDOWN_TIMEOUT_SECONDS = 10;
+    private static final int PROCESS_EXIT_TIMEOUT_SECONDS = 10;
     private static final int FORCE_KILL_TIMEOUT_SECONDS = 10;
 
     /**
@@ -119,6 +121,7 @@ public final class CopilotClient implements AutoCloseable {
     private final CliServerManager serverManager;
     private final LifecycleEventManager lifecycleManager = new LifecycleEventManager();
     private final Map<String, CopilotSession> sessions = new ConcurrentHashMap<>();
+    private final AhpHostManager ahpHosts;
     private final GitHubTokenProviderRegistry gitHubTokenProviders = new GitHubTokenProviderRegistry();
     private volatile CompletableFuture<Connection> connectionFuture;
     private volatile boolean disposed = false;
@@ -234,6 +237,7 @@ public final class CopilotClient implements AutoCloseable {
 
         InternalExecutorProvider executorProvider = new InternalExecutorProvider(this.options.getExecutor());
         this.executor = executorProvider.get();
+        this.ahpHosts = new AhpHostManager(sessions, executor);
         this.executorCanBeShutdown = executorProvider.canBeShutdown();
 
         this.serverManager = new CliServerManager(this.options);
@@ -554,21 +558,43 @@ public final class CopilotClient implements AutoCloseable {
             JsonRpcClient connectedRpc = rpc;
             Connection connection = new Connection(connectedRpc, process, new ServerRpc(connectedRpc::invoke),
                     inProcessTransport == null ? null : inProcessTransport.host());
-            connectedRpc.setCloseHandler(() -> sessions.values().forEach(CopilotSession::cancelPendingExternalTools));
 
             // Register handlers for server-to-client calls
             RpcHandlerDispatcher dispatcher = new RpcHandlerDispatcher(sessions, lifecycleManager::dispatch, executor,
                     gitHubTokenProviders);
             dispatcher.registerHandlers(connectedRpc);
+            ahpHosts.register(connectedRpc);
 
             // Register the LLM inference request handler when configured.
             com.github.copilot.CopilotRequestHandler requestHandler = this.options.getRequestHandler();
             boolean hasLlmInference = requestHandler != null;
+            LlmInferenceAdapter llmAdapter = null;
             if (hasLlmInference) {
-                LlmInferenceAdapter llmAdapter = new LlmInferenceAdapter(requestHandler,
-                        () -> connection.serverRpc().llmInference, executor);
+                llmAdapter = new LlmInferenceAdapter(requestHandler, () -> connection.serverRpc().llmInference,
+                        executor);
                 llmAdapter.registerHandlers(connectedRpc);
             }
+            LlmInferenceAdapter connectedLlmAdapter = llmAdapter;
+
+            InstallationConfirmationHandler installationConfirmationHandler = this.options
+                    .getInstallationConfirmationHandler();
+            InstallationConfirmationAdapter installationConfirmationAdapter = null;
+            if (installationConfirmationHandler != null) {
+                installationConfirmationAdapter = new InstallationConfirmationAdapter(installationConfirmationHandler,
+                        executor);
+                installationConfirmationAdapter.registerHandlers(connectedRpc);
+            }
+            InstallationConfirmationAdapter connectedInstallationConfirmationAdapter = installationConfirmationAdapter;
+            connectedRpc.setCloseHandler(() -> {
+                ahpHosts.disconnect(connection.serverRpc().host);
+                sessions.values().forEach(CopilotSession::cancelPendingExternalTools);
+                if (connectedLlmAdapter != null) {
+                    connectedLlmAdapter.cancelPending();
+                }
+                if (connectedInstallationConfirmationAdapter != null) {
+                    connectedInstallationConfirmationAdapter.closePending();
+                }
+            });
 
             // Register the GitHub telemetry forwarding handler when configured.
             Function<GitHubTelemetryNotification, CompletableFuture<Void>> onGitHubTelemetry = this.options
@@ -615,7 +641,21 @@ public final class CopilotClient implements AutoCloseable {
             }
             // Clean up the spawned process if connection setup failed
             if (process != null) {
+                Throwable startupFailure = e;
+                while (startupFailure instanceof java.util.concurrent.ExecutionException
+                        || startupFailure instanceof CompletionException) {
+                    startupFailure = startupFailure.getCause();
+                }
+                // A broken pipe can precede the child's own exit and trailing stderr.
+                // Other setup failures must terminate a live server before waiting for EOF.
+                boolean drainBeforeCleanup = startupFailure instanceof IOException;
+                if (drainBeforeCleanup) {
+                    serverManager.awaitStderrReader();
+                }
                 cleanupCliProcess(process, true);
+                if (!drainBeforeCleanup) {
+                    serverManager.awaitStderrReader();
+                }
             }
             if (rpc != null) {
                 try {
@@ -712,8 +752,10 @@ public final class CopilotClient implements AutoCloseable {
      * <ol>
      * <li>Closes all active sessions (releases in-memory resources)</li>
      * <li>Requests runtime shutdown for SDK-owned CLI processes</li>
-     * <li>Closes the JSON-RPC connection</li>
-     * <li>Terminates the CLI server process (if spawned by this client)</li>
+     * <li>Closes stdin for an owned stdio process and waits for its host
+     * cleanup</li>
+     * <li>Closes the JSON-RPC connection, terminating an owned process if
+     * needed</li>
      * </ol>
      * <p>
      * Note: session data on disk is preserved, so sessions can be resumed later. To
@@ -723,6 +765,7 @@ public final class CopilotClient implements AutoCloseable {
      * @return A future that completes when the client is stopped
      */
     public CompletableFuture<Void> stop() {
+        ahpHosts.disconnect();
         var closeFutures = new ArrayList<CompletableFuture<Void>>();
 
         for (CopilotSession session : new ArrayList<>(sessions.values())) {
@@ -756,6 +799,7 @@ public final class CopilotClient implements AutoCloseable {
      * @return A future that completes when the client is stopped
      */
     public CompletableFuture<Void> forceStop() {
+        ahpHosts.disconnect();
         disposed = true;
         var activeSessions = new ArrayList<>(sessions.values());
         sessions.clear();
@@ -805,7 +849,10 @@ public final class CopilotClient implements AutoCloseable {
                         });
             }
 
-            return shutdownFuture.handle((ignored, error) -> {
+            return shutdownFuture.handleAsync((ignored, error) -> {
+                if (gracefulRuntimeShutdown && connection.process != null && options.isUseStdio()) {
+                    awaitStdioProcessExit(connection.process);
+                }
                 try {
                     connection.rpc.close();
                 } catch (Exception e) {
@@ -819,43 +866,60 @@ public final class CopilotClient implements AutoCloseable {
                     closeRuntimeHost(connection.runtimeHost);
                 }
                 return (Void) null;
-            });
+            }, SHUTDOWN_DISPATCHER);
         }).thenCompose(result -> result);
     }
 
-    private static void cleanupCliProcess(Process process, boolean forceImmediately) {
+    private static void awaitStdioProcessExit(Process process) {
+        try {
+            // Host telemetry flushes after stdio EOF, not the shutdown RPC response.
+            // Keep the reader draining stdout until the child has finished.
+            process.getOutputStream().close();
+            if (!process.waitFor(PROCESS_EXIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                LOG.fine("Process did not exit after stdin EOF within graceful shutdown timeout; terminating");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.log(Level.FINE, "Interrupted while waiting for process exit", e);
+        } catch (IOException e) {
+            LOG.log(Level.FINE, "Error closing process stdin", e);
+        }
+    }
+
+    /**
+     * Returns true only when the child had already exited and no streams were
+     * destroyed.
+     */
+    private static boolean cleanupCliProcess(Process process, boolean forceImmediately) {
         try {
             if (process.isAlive()) {
-                // The runtime completes all cleanup before responding to
-                // runtime.shutdown and then leaves termination to us; it
-                // deliberately keeps its JSON-RPC server alive to send the
-                // response and never self-exits. Waiting for a self-exit that
-                // will never come just wastes time, so terminate the child
-                // immediately and only wait to reap it.
                 if (forceImmediately) {
                     process.destroyForcibly();
                     if (!process.waitFor(FORCE_KILL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                         LOG.fine("Process did not terminate within force kill timeout");
                     }
-                    return;
+                    return false;
                 }
 
                 process.destroy();
                 if (process.waitFor(FORCE_KILL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                    return;
+                    return false;
                 }
 
                 process.destroyForcibly();
                 if (!process.waitFor(FORCE_KILL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                     LOG.fine("Process did not terminate within force kill timeout");
                 }
+                return false;
             }
+            return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.log(Level.FINE, "Interrupted while killing process", e);
         } catch (Exception e) {
             LOG.log(Level.FINE, "Error killing process", e);
         }
+        return false;
     }
 
     /**
@@ -1060,6 +1124,7 @@ public final class CopilotClient implements AutoCloseable {
                                     "CopilotClient.createSession complete. Elapsed={Elapsed}, SessionId="
                                             + session.getSessionId(),
                                     totalNanos);
+                            ahpHosts.capture(session, request);
                             return session;
                         });
                     }).exceptionally(ex -> {
@@ -1221,6 +1286,7 @@ public final class CopilotClient implements AutoCloseable {
                         session.setWorkspacePath(response.workspacePath());
                         session.setCapabilities(response.capabilities());
                         session.setOpenCanvases(response.openCanvases());
+                        session.setTranscriptRecovery(response.transcriptRecovery());
                         // If the server returned a different sessionId than what was requested,
                         // re-key.
                         String returnedId = response.sessionId();
@@ -1243,6 +1309,7 @@ public final class CopilotClient implements AutoCloseable {
                                     } else {
                                         gitHubTokenProviders.retire(session.getSessionId());
                                     }
+                                    ahpHosts.capture(session, request);
                                     return session;
                                 });
                     }).exceptionally(ex -> {
@@ -1375,6 +1442,7 @@ public final class CopilotClient implements AutoCloseable {
                 null, // envValueMode
                 null, // allowAllMcpServerInstructions
                 null, // skillDirectories
+                null, // ignoredSkillsLocations
                 patchSkills, // includedBuiltinSkills
                 null, // disabledSkills
                 null, // enableOnDemandInstructionDiscovery
@@ -1749,6 +1817,41 @@ public final class CopilotClient implements AutoCloseable {
         return lifecycleManager.subscribe(eventType, handler);
     }
 
+    /**
+     * Starts in-process AHP hosting owned by this client's current connection. At
+     * least one of local server or GitHub environment must be selected explicitly.
+     * Application callbacks stay in this SDK process; no host executable is
+     * launched. If the returned future is cancelled, a listener that subsequently
+     * starts is disposed.
+     *
+     * @param options
+     *            listener options and optional application session factories
+     * @return a ready listener bound to its original transport
+     */
+    @CopilotExperimental
+    public CompletableFuture<AhpHost> startAhpHost(AhpHostOptions options) {
+        if (options == null || (options.getLocalServer() == null && options.getGithubEnvironment() == null)) {
+            return CompletableFuture
+                    .failedFuture(new IllegalArgumentException("At least one AHP transport must be configured"));
+        }
+        var snapshot = new AhpHostOptions(options);
+        var result = new CompletableFuture<AhpHost>();
+        ensureConnected().thenCompose(connection -> result.isDone()
+                ? CompletableFuture.<AhpHost>failedFuture(new java.util.concurrent.CancellationException())
+                : ahpHosts.start(connection.serverRpc().host, snapshot)).whenComplete((host, error) -> {
+                    if (error != null) {
+                        result.completeExceptionally(error);
+                    } else if (!result.complete(host)) {
+                        host.dispose().whenComplete((ignored, cleanupError) -> {
+                            if (cleanupError != null) {
+                                LOG.log(Level.WARNING, "AHP cancelled startup cleanup failed", cleanupError);
+                            }
+                        });
+                    }
+                });
+        return result;
+    }
+
     private CompletableFuture<Connection> ensureConnected() {
         if (connectionFuture == null && !options.isAutoStart()) {
             throw new IllegalStateException("Client not connected. Call start() first.");
@@ -1762,9 +1865,11 @@ public final class CopilotClient implements AutoCloseable {
      * Closes this client using graceful shutdown semantics.
      * <p>
      * This method is intended for {@code try-with-resources} usage and blocks while
-     * waiting for {@link #stop()} to complete, up to
-     * {@link #AUTOCLOSEABLE_TIMEOUT_SECONDS} seconds. If shutdown fails or times
-     * out, the error is logged at {@link Level#FINE} and the method returns.
+     * waiting for {@link #stop()} to complete. The timeout includes the bounded
+     * runtime shutdown, natural exit, termination and kill phases, plus
+     * {@link #AUTOCLOSEABLE_TIMEOUT_SECONDS} for session cleanup. If shutdown fails
+     * or times out, the error is logged at {@link Level#FINE} and the method
+     * returns.
      * <p>
      * This method is idempotent.
      *
@@ -1778,7 +1883,8 @@ public final class CopilotClient implements AutoCloseable {
             return;
         disposed = true;
         try {
-            stop().get(AUTOCLOSEABLE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            stop().get(AUTOCLOSEABLE_TIMEOUT_SECONDS + RUNTIME_SHUTDOWN_TIMEOUT_SECONDS + PROCESS_EXIT_TIMEOUT_SECONDS
+                    + 2 * FORCE_KILL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
             LOG.log(Level.FINE, "Error during close", e);
         } finally {

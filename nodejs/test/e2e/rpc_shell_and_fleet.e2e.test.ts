@@ -5,18 +5,20 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { approveAll, defineTool } from "../../src/index.js";
 import type { CopilotSession, SessionEvent } from "../../src/index.js";
 import { createSdkTestContext } from "./harness/sdkTestContext.js";
+import { waitForCondition } from "./harness/sdkTestHelper.js";
 
 describe("Shell and fleet RPC", async () => {
     const { copilotClient: client, workDir } = await createSdkTestContext();
 
     function createWriteFileCommand(markerPath: string, marker: string): string {
         if (os.platform() === "win32") {
-            return `powershell -NoLogo -NoProfile -Command "Set-Content -LiteralPath '${markerPath}' -Value '${marker}'"`;
+            return `echo ${marker}>"${markerPath}"`;
         }
         return `sh -c "printf '%s' '${marker}' > '${markerPath}'"`;
     }
@@ -68,7 +70,7 @@ describe("Shell and fleet RPC", async () => {
         const marker = "copilot-sdk-shell-rpc";
 
         const result = await session.rpc.shell.exec({
-            command: createWriteFileCommand(markerPath, marker),
+            command: createWriteFileCommand(path.basename(markerPath), marker),
             cwd: workDir,
         });
 
@@ -95,6 +97,139 @@ describe("Shell and fleet RPC", async () => {
 
         await session.disconnect();
     });
+
+    it("should honor custom cwd for shell exec", async () => {
+        const session = await client.createSession({ onPermissionRequest: approveAll });
+        const cwd = path.join(workDir, `shell-cwd-${randomUUID()}`);
+        fs.mkdirSync(cwd);
+        try {
+            const result = await session.rpc.shell.exec({
+                command: createWriteFileCommand("marker.txt", "custom-cwd"),
+                cwd,
+            });
+            expect(result.processId).toBeTruthy();
+            await waitForFileText(path.join(cwd, "marker.txt"), "custom-cwd");
+        } finally {
+            await session.disconnect();
+        }
+    });
+
+    it("should return false when killing an unknown shell process", async () => {
+        const session = await client.createSession({ onPermissionRequest: approveAll });
+        try {
+            expect(
+                (await session.rpc.shell.kill({ processId: `unknown-${randomUUID()}` })).killed
+            ).toBe(false);
+        } finally {
+            await session.disconnect();
+        }
+    });
+
+    it.each(["SIGTERM", "SIGKILL"] as const)(
+        "should release shell process after %s",
+        async (signal) => {
+            const session = await client.createSession({ onPermissionRequest: approveAll });
+            const command =
+                os.platform() === "win32"
+                    ? 'powershell -NoLogo -NoProfile -Command "Start-Sleep -Seconds 60"'
+                    : "sleep 60";
+            try {
+                const result = await session.rpc.shell.exec({ command, cwd: workDir });
+                expect(result.processId).toBeTruthy();
+                expect(
+                    (await session.rpc.shell.kill({ processId: result.processId, signal })).killed
+                ).toBe(true);
+                await waitForCondition(
+                    async () =>
+                        !(await session.rpc.shell.kill({ processId: result.processId })).killed,
+                    { timeoutMessage: `Process ${result.processId} remains after ${signal}` }
+                );
+            } finally {
+                await session.disconnect();
+            }
+        }
+    );
+
+    it(
+        "should stop a timed-out shell command before its final marker",
+        { timeout: 60_000 },
+        async () => {
+            const session = await client.createSession({ onPermissionRequest: approveAll });
+            const started = path.join(workDir, `shell-started-${randomUUID()}.txt`);
+            const completed = path.join(workDir, `shell-completed-${randomUUID()}.txt`);
+            const timeout = os.platform() === "win32" ? 10_000 : 1_000;
+            const command =
+                os.platform() === "win32"
+                    ? `echo started>"${started}" & ping.exe -n 31 127.0.0.1 >nul & echo completed>"${completed}"`
+                    : `printf started > '${started}'; sleep 30; printf completed > '${completed}'`;
+            try {
+                const result = await session.rpc.shell.exec({ command, cwd: workDir, timeout });
+                expect(result.processId).toBeTruthy();
+                await waitForCondition(() => fs.existsSync(started), {
+                    timeoutMessage: `Timed-out shell command did not start: ${started}`,
+                });
+                // The start marker acknowledges the phase before the deadline is observed.
+                await new Promise((resolve) => setTimeout(resolve, timeout + 2_000));
+                expect((await session.rpc.shell.kill({ processId: result.processId })).killed).toBe(
+                    false
+                );
+                expect(fs.existsSync(completed)).toBe(false);
+            } finally {
+                await session.disconnect();
+            }
+        }
+    );
+
+    it("should accept a missing shell command and clean up after it exits", async () => {
+        const session = await client.createSession({ onPermissionRequest: approveAll });
+        const marker = path.join(workDir, `shell-missing-${randomUUID()}.txt`);
+        const missingCommand = `not-a-command-${randomUUID()}`;
+        const command =
+            os.platform() === "win32"
+                ? `${missingCommand} & echo done>"${marker}" & exit /b 1`
+                : `${missingCommand}; code=$?; printf done > '${marker}'; exit $code`;
+        try {
+            const result = await session.rpc.shell.exec({ command, cwd: workDir });
+            expect(result.processId).toBeTruthy();
+            await waitForFileText(marker, "done");
+            // The shell may still be flushing stderr when the final marker is written.
+            await new Promise((resolve) => setTimeout(resolve, 1_000));
+            expect((await session.rpc.shell.kill({ processId: result.processId })).killed).toBe(
+                false
+            );
+        } finally {
+            await session.disconnect();
+        }
+    });
+
+    it.each(["stderr", "large-stdout"] as const)(
+        "should clean up shell process after %s output",
+        async (outputKind) => {
+            const session = await client.createSession({ onPermissionRequest: approveAll });
+            const marker = path.join(workDir, `shell-${outputKind}-${randomUUID()}.txt`);
+            const command =
+                outputKind === "stderr"
+                    ? os.platform() === "win32"
+                        ? `powershell -NoLogo -NoProfile -Command "[Console]::Error.WriteLine('boom'); Set-Content -LiteralPath '${marker}' -Value done; exit 2"`
+                        : `echo boom 1>&2; printf done > '${marker}'; exit 2`
+                    : os.platform() === "win32"
+                      ? `powershell -NoLogo -NoProfile -Command "Write-Host ('x' * 71680); Set-Content -LiteralPath '${marker}' -Value done"`
+                      : `printf '%71680s' '' | tr ' ' '='; printf done > '${marker}'`;
+            try {
+                const result = await session.rpc.shell.exec({ command, cwd: workDir });
+                expect(result.processId).toBeTruthy();
+                await waitForFileText(marker, "done");
+                // The process map is updated after the output stream closes.
+                await new Promise((resolve) => setTimeout(resolve, 2_000));
+                expect((await session.rpc.shell.kill({ processId: result.processId })).killed).toBe(
+                    false
+                );
+            } finally {
+                await session.disconnect();
+            }
+        },
+        60_000
+    );
 
     it("should start fleet and complete custom tool task", { timeout: 180_000 }, async () => {
         const markerPath = path.join(

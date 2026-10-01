@@ -54,6 +54,14 @@ describe("Server-scoped MCP config RPC", () => {
             await client.rpc.mcp.config.add({ name: serverName, config });
             const afterAdd = await client.rpc.mcp.config.list();
             expect(afterAdd.servers[serverName]).toBeDefined();
+            const discovered = await client.rpc.mcp.discover({
+                workingDirectory: process.cwd(),
+                includeEffectiveSource: true,
+            });
+            expect(discovered.servers.find((server) => server.name === serverName)).toMatchObject({
+                enabled: true,
+                effectiveSource: expect.anything(),
+            });
 
             await client.rpc.mcp.config.update({ name: serverName, config: updatedConfig });
             const afterUpdate = await client.rpc.mcp.config.list();
@@ -65,7 +73,17 @@ describe("Server-scoped MCP config RPC", () => {
             expect(updated.args?.[0]).toBe("--version");
 
             await client.rpc.mcp.config.disable({ names: [serverName] });
+            expect(
+                (await client.rpc.mcp.discover({ workingDirectory: process.cwd() })).servers.find(
+                    (server) => server.name === serverName
+                )?.enabled
+            ).toBe(false);
             await client.rpc.mcp.config.enable({ names: [serverName] });
+            expect(
+                (await client.rpc.mcp.discover({ workingDirectory: process.cwd() })).servers.find(
+                    (server) => server.name === serverName
+                )?.enabled
+            ).toBe(true);
         } finally {
             await client.rpc.mcp.config.remove({ name: serverName });
         }

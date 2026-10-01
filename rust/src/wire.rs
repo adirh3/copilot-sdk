@@ -94,6 +94,11 @@ pub(crate) struct SessionCreateWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<IndexMap<String, McpServerConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<crate::generated::api_types::DiagnosticsConfiguration>,
+    #[serde(
+        rename = "mcpOAuthTokenStorage",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mcp_oauth_token_storage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_client_id_metadata_url: Option<String>,
@@ -106,6 +111,8 @@ pub(crate) struct SessionCreateWire {
     pub skip_embedding_retrieval: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_custom_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_custom_instructions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_on_demand_instruction_discovery: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -257,6 +264,11 @@ pub(crate) struct SessionResumeWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<IndexMap<String, McpServerConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<crate::generated::api_types::DiagnosticsConfiguration>,
+    #[serde(
+        rename = "mcpOAuthTokenStorage",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mcp_oauth_token_storage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_client_id_metadata_url: Option<String>,
@@ -361,6 +373,8 @@ pub(crate) struct SessionResumeWire {
     pub suppress_resume_event: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continue_pending_work: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_transcript_recovery: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feature_flags: Option<HashMap<String, bool>>,
     #[serde(skip_serializing_if = "Option::is_none")]

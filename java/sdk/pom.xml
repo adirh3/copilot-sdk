@@ -257,7 +257,7 @@
                     </systemPropertyVariables>
                     <!--
                         Keep the integration-test JVM aligned with Surefire so
-                        tests like SlashCommandsIT resolve the pinned CLI using
+                        integration tests resolve the pinned CLI using
                         the monorepo Node.js runtime preparation tooling.
                     -->
                     <environmentVariables>
@@ -680,7 +680,6 @@ did not produce the multi-release output. Re-build on JDK 25+ and verify the
                                 <exclude>**/ErgonomicToolDefinitionIT.java</exclude>
                                 <exclude>**/GitHubTelemetryForwardingIT.java</exclude>
                                 <exclude>**/LowLevelToolDefinitionIT.java</exclude>
-                                <exclude>**/RewindIT.java</exclude>
                                 <exclude>**/SystemMessageSectionsIT.java</exclude>
                             </excludes>
                             <environmentVariables>

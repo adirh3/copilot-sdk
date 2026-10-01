@@ -7,6 +7,7 @@
  */
 
 import fs from "fs/promises";
+import { realpathSync } from "fs";
 import type { JSONSchema7 } from "json-schema";
 import { compile } from "json-schema-to-typescript";
 import path from "path";
@@ -50,6 +51,7 @@ import {
     type DefinitionCollections,
     type RpcMethod,
 } from "./utils.js";
+import { validateLegacyDefinitions, validateLegacyRequests } from "./legacy-parameters.js";
 
 const TS_EXPERIMENTAL_JSDOC = "/** @experimental */";
 const EXTERNAL_SCHEMA_TS_IMPORT: Record<string, string> = {
@@ -431,6 +433,12 @@ export function normalizeSchemaForTypeScript(
         delete rewritten["x-opaque-json"];
         delete rewritten["x-opaque-in-process"];
 
+        // A title names an enum that other generators infer from a discriminator; a
+        // TypeScript literal needs no alias, so keep it inline.
+        if (typeof rewritten.title === "string" && "const" in rewritten && typeof rewritten.const === "string") {
+            delete rewritten.title;
+        }
+
         const enumValueDescriptions = getEnumValueDescriptions(rewritten as JSONSchema7);
         if (enumValueDescriptions && Array.isArray(rewritten.enum) && rewritten.enum.every((entry) => typeof entry === "string")) {
             rewritten.tsType = (rewritten.enum as string[])
@@ -663,13 +671,22 @@ function resultTypeName(method: RpcMethod): string {
     return externalRef?.definitionName ?? getRpcSchemaTypeName(schema, method.rpcMethod.split(".").map(toPascalCase).join("") + "Result");
 }
 
-function tsNullableResultTypeName(method: RpcMethod): string | undefined {
-    const resultSchema = getMethodResultSchema(method);
+export function tsNullableResultTypeName(
+    method: RpcMethod,
+    resultSchema = getMethodResultSchema(method),
+): string | undefined {
     if (!resultSchema) return undefined;
     const inner = getNullableInner(resultSchema);
     if (!inner) return undefined;
     // Resolve $ref to a type name
     if (inner.$ref) {
+        if (
+            method.result?.$ref &&
+            resultSchema.title &&
+            resultSchema.anyOf?.some((variant) => typeof variant === "object" && variant.type === "null")
+        ) {
+            return resultSchema.title;
+        }
         const refName = inner.$ref.split("/").pop();
         if (refName) return `${toPascalCase(refName)} | undefined`;
     }
@@ -741,6 +758,15 @@ import type { MessageConnection } from "vscode-jsonrpc/node.js";
     // Build a single combined schema with shared definitions and all method types.
     // This ensures $ref-referenced types are generated exactly once.
     rpcDefinitions = collectDefinitionCollections(schema as Record<string, unknown>);
+    // Added inputs are optional properties of the same request interface.
+    validateLegacyRequests(
+        schema,
+        (node) => collectRpcMethods(node),
+        getMethodParamsSchema,
+        (method) => !!(method.params && getNullableInner(method.params))
+    );
+    // Response records gain optional properties of the same interface.
+    validateLegacyDefinitions(rpcDefinitions);
     const combinedSchema = withSharedDefinitions(
         {
             $schema: "http://json-schema.org/draft-07/schema#",
@@ -1177,7 +1203,7 @@ export function emitClientSessionApiRegistration(clientSchema: Record<string, un
  * incoming call to the registered handler regardless of which (if any)
  * runtime session triggered it.
  */
-function emitClientGlobalApiRegistration(clientSchema: Record<string, unknown>): string[] {
+export function emitClientGlobalApiRegistration(clientSchema: Record<string, unknown>): string[] {
     const lines: string[] = [];
     const groups = collectClientGroups(clientSchema);
 
@@ -1310,7 +1336,29 @@ async function generate(sessionSchemaPath?: string, apiSchemaPath?: string): Pro
 
 const __filename = fileURLToPath(import.meta.url);
 
-if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+export function isTypeScriptCodegenEntrypoint(
+    entryPath: string | undefined,
+    modulePath = __filename,
+    platform = process.platform,
+): boolean {
+    if (!entryPath) {
+        return false;
+    }
+    const canonicalize = (filePath: string) => {
+        try {
+            return realpathSync.native(filePath);
+        } catch {
+            return path.resolve(filePath);
+        }
+    };
+    const canonicalEntryPath = canonicalize(entryPath);
+    const canonicalModulePath = canonicalize(modulePath);
+    return platform === "win32"
+        ? canonicalEntryPath.toLowerCase() === canonicalModulePath.toLowerCase()
+        : canonicalEntryPath === canonicalModulePath;
+}
+
+if (isTypeScriptCodegenEntrypoint(process.argv[1])) {
     const sessionArg = process.argv[2] || undefined;
     const apiArg = process.argv[3] || undefined;
     generate(sessionArg, apiArg).catch((err) => {

@@ -63,12 +63,20 @@ public final class SessionFusionResolvedEvent extends SessionEvent {
         @JsonProperty("scores") FusionScores scores,
         /** Validated orchestration pattern selected for the turn. */
         @JsonProperty("pattern") FusionPattern pattern,
+        /** Short human-readable summary of the selected workflow, suitable for immediate client display after routing. May be absent in older durable events; omit the explanation or derive one from pattern and phasePlan. Display text, not a stable machine-readable value. */
+        @JsonProperty("hint") String hint,
         /** Presentation-neutral phase plan for clients that render workflow progress. */
         @JsonProperty("phasePlan") List<FusionPhasePlanStep> phasePlan,
         /** Concrete model selected for the primary solver phase. */
         @JsonProperty("primaryModel") String primaryModel,
-        /** Concrete model selected for the review or judge phase, when required. */
+        /** Concrete model selected for Critique review, or the legacy Cascade judge/repair model when role-specific fields are absent. */
         @JsonProperty("secondaryModel") String secondaryModel,
+        /** Concrete model selected for Cascade escalation-gate calls, when required. */
+        @JsonProperty("judgeModel") String judgeModel,
+        /** Concrete model selected for Cascade repair, when required. */
+        @JsonProperty("repairModel") String repairModel,
+        /** Planned Critique phase identities, including independent critics with repeated model IDs. May be absent in older events; consumers then use secondaryModel for the legacy critic. */
+        @JsonProperty("critics") List<FusionCritic> critics,
         /** Concrete model used when the planned primary model cannot execute. */
         @JsonProperty("fallbackModel") String fallbackModel,
         /** Concrete model recommended for eligible follow-up turns. */

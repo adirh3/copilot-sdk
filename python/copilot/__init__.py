@@ -119,6 +119,18 @@ from .generated.session_events import (
     SessionEvent,
     SessionEventType,
 )
+from .host import (
+    AhpHost,
+    AhpHostExit,
+    AhpHostOptions,
+    AhpSessionCreateRequest,
+    AhpSessionResumeRequest,
+)
+from .installation_confirmation import (
+    InstallationConfirmationContext,
+    InstallationConfirmationDecision,
+    InstallationConfirmationHandler,
+)
 from .session import (
     AgentMessageSource,
     AgentStopHandler,
@@ -198,6 +210,7 @@ from .session import (
     SessionUiCapabilities,
     SystemMessageConfig,
     ToolSearchConfig,
+    TranscriptRecoveryReport,
     UserInputHandler,
     UserInputRequest,
     UserInputResponse,
@@ -236,6 +249,11 @@ except PackageNotFoundError:
     __version__ = "0.0.0.dev0"
 
 __all__ = [
+    "AhpHost",
+    "AhpHostExit",
+    "AhpHostOptions",
+    "AhpSessionCreateRequest",
+    "AhpSessionResumeRequest",
     "AgentMessageSource",
     "AgentStopHandler",
     "AgentStopHookInput",
@@ -271,6 +289,7 @@ __all__ = [
     "CopilotClientMode",
     "CopilotExpAssignmentResponse",
     "CopilotSession",
+    "TranscriptRecoveryReport",
     "CopilotRequestContext",
     "CopilotRequestHandler",
     "CopilotWebSocketCloseStatus",
@@ -312,6 +331,9 @@ __all__ = [
     "GitHubTokenResult",
     "GitHubTokenCancelledResult",
     "InfiniteSessionConfig",
+    "InstallationConfirmationContext",
+    "InstallationConfirmationDecision",
+    "InstallationConfirmationHandler",
     "InProcessRuntimeConnection",
     "InputOptions",
     "LargeToolOutputConfig",

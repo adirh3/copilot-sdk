@@ -37,6 +37,17 @@ dotnet run --file dotnet/samples/ManualToolResume.cs
 
 ## Quick Start
 
+For experimental in-process AHP hosting, select a transport explicitly:
+`client.StartAhpHostAsync(new AhpHostOptions { LocalServer = new() })`.
+For GitHub Mission Control, set
+`GitHubEnvironment = new() { Name = "My host", ComputeId = "compute-id" }`
+instead, or configure both transports. GitHub environment name and compute ID are
+required; there is no implicit local listener. The host's `Url`, `Token`, and `Pid`
+are nullable; `EnvironmentId` contains the GitHub environment ID when configured.
+Environment list/get/delete operations are available only through the generated RPC API.
+See [runtime-supervised AHP hosting](../docs/runtime-supervised-host.md) for creation
+and resume callbacks, resident-session publication, ownership, and shared-snapshot E2Es.
+
 ```csharp
 using GitHub.Copilot;
 
@@ -99,6 +110,7 @@ new CopilotClient(CopilotClientOptions? options = null)
 - `GitHubToken` - GitHub token for authentication. When provided, takes priority over other auth methods.
 - `UseLoggedInUser` - Whether to use logged-in user for authentication (default: true, but false when `GitHubToken` is provided). Cannot be used with `RuntimeConnection.ForUri(...)`.
 - `Telemetry` - OpenTelemetry configuration for the runtime process. Providing this enables telemetry — no separate flag needed. See [Telemetry](#telemetry) below.
+- `InstallationConfirmationHandler` - Experimental connection-global human review for `installations.confirm`. Receives the typed request and one cancellation token that is cancelled when the request is retired or the connection closes, and returns an explicit decision. Does not enable installation capabilities.
 
 #### RuntimeConnection
 
@@ -113,6 +125,49 @@ adjacent `runtime.node` by default. An explicit connection path or
 `COPILOT_CLI_PATH` overrides the bundled runtime.
 Managed launch fails if the bundled wrapper pair is unavailable.
 
+#### Installation confirmation (experimental)
+
+Set `CopilotClientOptions.InstallationConfirmationHandler` to receive the
+runtime's `installations.confirm` callback. The handler receives the generated
+`GitHub.Copilot.Rpc.InstallationsConfirmRequest` and an
+`InstallationConfirmationContext`, and returns only an explicit
+`GitHub.Copilot.Rpc.InstallationDecision.Confirm`, `.Decline` or `.Cancel`. The
+SDK echoes the original challenge and review fingerprint; it never infers approval.
+
+Match `OperationId` and `PolicySessionId` against the original action on this
+exact connection before presenting the complete review. Missing legacy session
+metadata does not select a default session. Refuse unknown operations or
+incomplete reviews. Concurrent reviews are independent and do not block other
+connection callbacks.
+
+`context.CancellationToken` is cancelled when the runtime sends numeric
+`$/cancelRequest`, including runtime-enforced expiry, or when the original
+connection closes. Observe it to close pending UI. Late handler results cannot
+approve a retired request, and this incoming signal does not cancel outbound
+installation or OAuth RPCs.
+
+Call `client.Rpc.Mcp.PrepareInstallAsync(...)` before
+`ApplyInstallAsync(...)`. Register its inert runtime-issued `OperationId`,
+original expiry and captured session on this client before applying. Removal
+uses `PlanUninstallAsync(...)` then `ApplyUninstallAsync(...)`; its
+`OperationId` identifies the operation, while `PlanHandle` is the one-use
+removal input. Never interchange them. The `Installations` namespace exposes
+`ListAsync`, `RecoverAsync`, `StatusAsync` and `CancelAsync`. Control uncertain
+work using its original connection and operation ID, without selecting a
+replacement session or replaying apply.
+
+Owned OAuth uses `session.Rpc.Mcp.Oauth.PrepareLoginAsync(...)` to return
+`LoginId` before browser, network or cached-reconnect work. Keep that ID with
+the original session and `ExpectedInstallationId` for `LoginAsync(...)` and
+`CancelLoginAsync(...)`. Preparation freezes reauthentication and display
+options. Dropping the login future is not a substitute for `CancelLoginAsync(...)`.
+Manual MCP OAuth retains its direct `LoginAsync(...)` path.
+
+A matching runtime contract and available owned-lifecycle support are required.
+Capability negotiation does not promise availability; preserve typed refusals
+instead of falling back to raw configuration writes. Generated presence and
+transport tests do not establish live OAuth, activation or cross-process recovery.
+
 #### Methods
 
 ##### `StartAsync(): Task`
@@ -122,6 +177,10 @@ Start the CLI server and establish connection.
 ##### `StopAsync(): Task`
 
 Stop the server and close all sessions. Throws if errors are encountered during cleanup.
+For an owned stdio runtime, graceful shutdown closes stdin and waits up to 10 seconds
+for host cleanup, including telemetry export. This cleanup is best-effort: if the wait
+times out, the process is terminated and that timeout alone is not reported as a cleanup
+error. A successful return does not guarantee that all telemetry was exported.
 
 ##### `ForceStopAsync(): Task`
 
@@ -138,6 +197,7 @@ Create a new conversation session.
 - `ReasoningEffort` - Reasoning effort level for models that support it ("low", "medium", "high", "xhigh", "max"). Use `ListModelsAsync()` to check which models support this option.
 - `Tools` - Custom tool declarations exposed to the CLI. Declarations without an invocable `AIFunction` are left pending for manual resolution.
 - `SystemMessage` - System message customization
+- `RefreshCustomInstructions` - `true` invalidates process-wide custom-instruction discovery caches before constructing the new session. Omitted or `false` reuses the caches. Other sessions in this runtime may observe updated instructions on later turns or discovery. This does not watch files or override instruction enablement. Available on `SessionConfig`, not `ResumeSessionConfig`.
 - `AvailableTools` - List of tool names to allow
 - `ExcludedTools` - List of tool names to disable
 - `Provider` - Custom API provider configuration (BYOK)
@@ -150,6 +210,11 @@ Create a new conversation session.
 - `OnUserInputRequest` - Handler for legacy question-and-answer requests from the agent. Enables the legacy `ask_user` tool. See [User Input Requests](#user-input-requests) section.
 - `AskUserVariant` - Selects the model-facing `ask_user` tool shape. Defaults to `AskUserVariant.Legacy`; use `AskUserVariant.Elicitation` with `OnElicitationRequest`.
 - `Hooks` - Hook handlers for session lifecycle events. See [Session Hooks](#session-hooks) section.
+- `CanvasHandler` - Handles canvas open, close, and action callbacks. The SDK awaits
+  asynchronous callbacks before replying, including callbacks without a result, unless
+  the runtime cancels the request first. A cancellation response can be sent while the
+  callback is still running. Their cancellation token is canceled by a per-request
+  `$/cancelRequest`, when the runtime connection closes, or when the client is disposed.
 
 ##### `ResumeSessionAsync(string sessionId, ResumeSessionConfig? config = null): Task<CopilotSession>`
 
@@ -160,6 +225,16 @@ Resume an existing session. Returns the session with `WorkspacePath` populated i
 - `OnPermissionRequest` - Optional handler called before each tool execution to approve or deny it. See [Permission Handling](#permission-handling) section.
 - `GitHubTokenProvider` - Replaces the session-scoped token provider when resuming. Cannot be combined with `GitHubToken`.
 - `AskUserVariant` - Re-supplies the model-facing `ask_user` tool shape on cold resume.
+- `AllowTranscriptRecovery` - Repairs a damaged transcript when true. The default
+  is true in all modes; set false to reject recovery. `session.TranscriptRecovery` contains
+  `PlannedBackupPath`, `InvalidLineNumbers` (including torn-tail loss), and
+  `SessionStartMoved` when repair is reported; otherwise it is null. On rejection,
+  `ResumeSessionAsync` throws an `IOException` whose `InnerException` is a
+  `RemoteRpcException`. Read `ErrorCode` (`-32075`) and `ErrorData` from that inner
+  exception for the server's typed error and its `invalidLineNumbers` /
+  `sessionStartMoved` fields. The outer message retains the existing communication-error
+  prefix. Disabling recovery still permits adding a missing newline after an intact
+  final record; it rejects torn tails.
 
 ```csharp
 await using var session = await client.CreateSessionAsync(new SessionConfig
@@ -260,6 +335,10 @@ Use `MessageSource.System` for application-generated system context and
 message's origin; it does not replace the session's system prompt or change
 delivery mode. `SendAndWaitAsync` accepts the same option and still waits for
 session idle, returning null if no assistant message was received.
+Sub-agent events remain visible to listeners but do not complete the wait or
+supply its reply.
+Synchronous listeners registered before `SendAndWaitAsync` finish processing
+the terminal event before the wait completes.
 
 ```csharp
 await session.SendAsync(new MessageOptions
@@ -1298,6 +1377,16 @@ try
     var session = await client.CreateSessionAsync();
     await session.SendAsync(new MessageOptions { Prompt = "Hello" });
 }
+catch (IOException ex) when (ex.InnerException is RemoteRpcException)
+{
+    var remote = (RemoteRpcException)ex.InnerException!;
+    Console.Error.WriteLine($"RPC error {remote.ErrorCode}: {remote.Message}");
+    if (remote.ErrorData is { } data)
+    {
+        // Interpret data according to the remote API's contract.
+        Console.Error.WriteLine($"Error data kind: {data.ValueKind}");
+    }
+}
 catch (IOException ex)
 {
     Console.Error.WriteLine($"Communication Error: {ex.Message}");
@@ -1307,6 +1396,17 @@ catch (Exception ex)
     Console.Error.WriteLine($"Error: {ex.Message}");
 }
 ```
+
+`RemoteRpcException` is in the `GitHub.Copilot` namespace. Remote JSON-RPC
+errors remain wrapped in `IOException`; connection failures are not remote errors.
+`ErrorData` is a `JsonElement?` that preserves objects, arrays, strings, numbers,
+booleans, and empty values without converting them to application-specific types.
+Omitted `data` has no nullable value; explicit JSON `null` has a value with
+`ValueKind == JsonValueKind.Null`. The cloned element remains valid after the
+response document or client is disposed. Exception messages and ordinary exception
+formatting do not include the data payload.
+Avoid logging it indiscriminately: server-provided data may contain sensitive
+information.
 
 ## Development
 

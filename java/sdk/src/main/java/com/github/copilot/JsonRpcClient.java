@@ -141,7 +141,13 @@ class JsonRpcClient implements AutoCloseable {
         long timingNanos = System.nanoTime();
         long id = requestIdCounter.incrementAndGet();
         var future = new CompletableFuture<JsonNode>();
-        pendingRequests.put(id, future);
+        synchronized (closeHandlerLock) {
+            if (closeNotified) {
+                future.completeExceptionally(new IOException("Client closed"));
+            } else {
+                pendingRequests.put(id, future);
+            }
+        }
 
         var request = new JsonRpcRequest();
         request.setJsonrpc("2.0");
@@ -149,11 +155,13 @@ class JsonRpcClient implements AutoCloseable {
         request.setMethod(method);
         request.setParams(params);
 
-        try {
-            sendMessage(request);
-        } catch (IOException e) {
-            pendingRequests.remove(id);
-            future.completeExceptionally(e);
+        if (!future.isDone()) {
+            try {
+                sendMessage(request);
+            } catch (IOException e) {
+                pendingRequests.remove(id);
+                future.completeExceptionally(e);
+            }
         }
 
         return future.thenApply(result -> {
@@ -350,6 +358,8 @@ class JsonRpcClient implements AutoCloseable {
             }
             closeNotified = true;
             handler = closeHandler;
+            pendingRequests.forEach((id, future) -> future.completeExceptionally(new IOException("Client closed")));
+            pendingRequests.clear();
         }
         if (handler != null) {
             try {
@@ -375,7 +385,8 @@ class JsonRpcClient implements AutoCloseable {
                                 ? errorNode.get("message").asText()
                                 : "Unknown error";
                         int errorCode = errorNode.has("code") ? errorNode.get("code").asInt() : -1;
-                        future.completeExceptionally(new JsonRpcException(errorCode, errorMessage));
+                        future.completeExceptionally(
+                                new JsonRpcException(errorCode, errorMessage, errorNode.get("data")));
                     } else {
                         future.complete(node.get("result"));
                     }
@@ -425,10 +436,6 @@ class JsonRpcClient implements AutoCloseable {
         running = false;
         readerExecutor.shutdownNow();
         notifyClose();
-
-        // Cancel all pending requests
-        pendingRequests.forEach((id, future) -> future.completeExceptionally(new IOException("Client closed")));
-        pendingRequests.clear();
 
         try {
             if (socket != null) {

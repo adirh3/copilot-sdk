@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+
 //! Tests for the build-time and runtime CLI provisioning path.
 //!
 //! Covers the `COPILOT_CLI_PATH` env override, the build-time-extracted
@@ -8,8 +10,13 @@
 
 use std::path::PathBuf;
 
+#[cfg(any(
+    all(feature = "bundled-cli", has_bundled_cli),
+    all(not(feature = "bundled-cli"), has_extracted_cli)
+))]
+use github_copilot_sdk::ErrorKind;
 use github_copilot_sdk::{
-    CliProgram, Client, ClientOptions, ErrorKind, HAS_BUNDLED_CLI, install_bundled_cli,
+    CliProgram, Client, ClientOptions, HAS_BUNDLED_CLI, install_bundled_cli,
     install_bundled_runtime,
 };
 #[cfg(all(feature = "bundled-cli", has_bundled_cli))]
@@ -79,6 +86,10 @@ async fn env_override_resolves_to_pointed_file() {
 
 /// A stale (non-existent) COPILOT_CLI_PATH falls through to the next
 /// resolution source (embed or dev) rather than failing outright.
+#[cfg(any(
+    all(feature = "bundled-cli", has_bundled_cli),
+    all(not(feature = "bundled-cli"), has_extracted_cli)
+))]
 #[tokio::test(flavor = "current_thread")]
 #[serial(copilot_cli_path)]
 async fn stale_env_override_falls_through() {
@@ -100,19 +111,19 @@ async fn stale_env_override_falls_through() {
 
 /// With `bundled-cli` off, `build.rs` extracts the runtime wrapper into the
 /// per-user cache and the runtime resolver recomputes its location from
-/// `COPILOT_SDK_CLI_VERSION` + the OS-derived binary name. This test
+/// `COPILOT_SDK_CLI_CACHE_ID` + the OS-derived binary name. This test
 /// mirrors that convention and asserts the file is on disk where the
 /// resolver expects to find it.
 #[cfg(all(not(feature = "bundled-cli"), has_extracted_cli))]
 #[test]
 fn extracted_binary_present_at_conventional_path() {
-    let version = env!("COPILOT_SDK_CLI_VERSION");
+    let cache_identity = env!("COPILOT_SDK_CLI_CACHE_ID");
     let binary = if cfg!(windows) {
         "copilot-runtime.exe"
     } else {
         "copilot-runtime"
     };
-    let sanitized = sanitize_version_for_test(version);
+    let sanitized = sanitize_cache_identity_for_test(cache_identity);
     let path = dirs::cache_dir()
         .expect("platform cache dir")
         .join("github-copilot-sdk")
@@ -127,8 +138,8 @@ fn extracted_binary_present_at_conventional_path() {
 }
 
 #[cfg(all(not(feature = "bundled-cli"), has_extracted_cli))]
-fn sanitize_version_for_test(version: &str) -> String {
-    version
+fn sanitize_cache_identity_for_test(cache_identity: &str) -> String {
+    cache_identity
         .chars()
         .map(|c| match c {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
@@ -213,7 +224,11 @@ fn pin_file_when_present_is_well_formed() {
             continue;
         }
         let contents = std::fs::read_to_string(&pin).expect("read CLI version snapshot");
-        let mut saw_version = false;
+        let version = contents
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .find_map(|(key, value)| (key.trim() == "version").then_some(value.trim()))
+            .unwrap_or_else(|| panic!("{filename} missing `version=` line"));
         let mut package_count = 0;
         for raw in contents.lines() {
             let line = raw.trim();
@@ -225,7 +240,19 @@ fn pin_file_when_present_is_well_formed() {
                 .unwrap_or_else(|| panic!("malformed line: {raw:?}"));
             assert!(!value.trim().is_empty(), "empty value for key {key:?}");
             if key.trim() == "version" {
-                saw_version = true;
+                continue;
+            } else if key.trim() == "release-url" {
+                assert!(
+                    value.trim()
+                        == format!(
+                            "https://github.com/github/copilot-cli/releases/download/v{version}"
+                        )
+                        || value.trim()
+                            == format!(
+                                "https://github.com/github/copilot-sdk/releases/download/runtime-{version}"
+                            ),
+                    "unexpected release URL in {filename}"
+                );
             } else {
                 assert_eq!(
                     value.trim().len(),
@@ -239,7 +266,6 @@ fn pin_file_when_present_is_well_formed() {
                 package_count += 1;
             }
         }
-        assert!(saw_version, "{filename} missing `version=` line");
         assert_eq!(
             package_count, 8,
             "{filename} has incomplete platform hashes"
@@ -342,7 +368,7 @@ fn install_bundled_runtime_returns_wrapper_bundle() {
         "runtime.node was not installed: {}",
         runtime_node.display()
     );
-    #[cfg(feature = "bundled-in-process")]
+    #[cfg(feature = "in-process")]
     {
         let runtime_library = first
             .parent()

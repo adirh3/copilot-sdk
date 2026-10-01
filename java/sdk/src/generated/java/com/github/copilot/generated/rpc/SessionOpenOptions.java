@@ -101,7 +101,7 @@ public record SessionOpenOptions(
     @JsonProperty("shellProcessFlags") List<String> shellProcessFlags,
     /** Resolved sandbox configuration. */
     @JsonProperty("sandboxConfig") SandboxConfig sandboxConfig,
-    /** Origin of the sandbox choice. The runtime uses this only for internal telemetry provenance; managed policy is derived independently. */
+    /** Origin of the sandbox choice. Settings-derived origins (never_configured, user_enabled, user_disabled, repository_policy) let managed policy floor a host preference; explicit below-floor changes remain policy conflicts unless a session opt-out is authorized. Also used for telemetry provenance. */
     @JsonProperty("sandboxConfigSource") SandboxConfigSource sandboxConfigSource,
     /** Whether interactive shell sessions are logged. */
     @JsonProperty("logInteractiveShells") Boolean logInteractiveShells,
@@ -115,6 +115,8 @@ public record SessionOpenOptions(
     @JsonProperty("allowAllMcpServerInstructions") Boolean allowAllMcpServerInstructions,
     /** Additional directories to search for skills. */
     @JsonProperty("skillDirectories") List<String> skillDirectories,
+    /** Skill scan directories and descendants excluded from discovery. Supports `~`-relative paths. */
+    @JsonProperty("ignoredSkillsLocations") List<String> ignoredSkillsLocations,
     /** Whether skill loading is enabled. When omitted, an SDK skill provider enables skills by default. */
     @JsonProperty("enableSkills") Boolean enableSkills,
     /** Whether the requesting SDK session has a skill provider. The provider remains ephemeral and is never persisted in session options or history. When enableSkills is false, it remains bound but dormant and receives no callbacks. Cloud, relay, handoff, and raw sessions.open flows reject it because they cannot safely pre-register the callback handler. */

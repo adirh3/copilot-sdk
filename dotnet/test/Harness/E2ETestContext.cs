@@ -7,6 +7,8 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using GitHub.Copilot.Rpc;
+using Environment = System.Environment;
 
 namespace GitHub.Copilot.Test.Harness;
 
@@ -18,7 +20,7 @@ public sealed class E2ETestContext : IAsyncDisposable
 
     public string HomeDir { get; }
     public string WorkDir { get; }
-    public string ProxyUrl { get; }
+    public string ProxyUrl { get; private set; }
     internal static bool UsesInProcessTransport => IsInProcess(null);
 
     /// <summary>Optional logger injected by tests; applied to all clients created via <see cref="CreateClient"/>.</summary>
@@ -32,6 +34,7 @@ public sealed class E2ETestContext : IAsyncDisposable
     private readonly List<CopilotClient> _persistentClients = [];
     private readonly List<CopilotClient> _transientClients = [];
     private readonly List<CopilotSession> _testSessions = [];
+    private readonly Dictionary<CopilotClient, string> _extensionSdkPaths = [];
 
     private E2ETestContext(string homeDir, string workDir, string proxyUrl, ReplayProxy proxy, string repoRoot)
     {
@@ -44,7 +47,12 @@ public sealed class E2ETestContext : IAsyncDisposable
         _legacyCliPath = GetCachedCliPath(repoRoot, "--print-legacy-path");
     }
 
-    public static async Task<E2ETestContext> CreateAsync()
+    public static Task<E2ETestContext> CreateAsync() => CreateAsync(
+        new ReplayProxy(),
+        Path.Combine(Path.GetTempPath(), $"copilot-test-config-{Guid.NewGuid()}"),
+        Path.Combine(Path.GetTempPath(), $"copilot-test-work-{Guid.NewGuid()}"));
+
+    internal static async Task<E2ETestContext> CreateAsync(ReplayProxy proxy, string homeDir, string workDir)
     {
         // A previous in-process context may have left this process's cwd inside a work
         // directory that has since been deleted. getcwd() then fails, which breaks
@@ -54,33 +62,45 @@ public sealed class E2ETestContext : IAsyncDisposable
 
         var repoRoot = FindRepoRoot();
 
-        var homeDir = Path.Combine(Path.GetTempPath(), $"copilot-test-config-{Guid.NewGuid()}");
-        var workDir = Path.Combine(Path.GetTempPath(), $"copilot-test-work-{Guid.NewGuid()}");
-
-        Directory.CreateDirectory(homeDir);
-        Directory.CreateDirectory(workDir);
-
         // Resolve symlinks (e.g., macOS /var -> /private/var) so paths
         // match what spawned subprocesses see when they resolve their cwd.
         homeDir = ResolveSymlinks(homeDir);
         workDir = ResolveSymlinks(workDir);
 
-        var proxy = new ReplayProxy();
-        var proxyUrl = await proxy.StartAsync();
-        // Creating an in-process fixture applies this URL before its first
-        // test-specific configuration is posted, so early runtime requests need
-        // an empty but valid replay state.
-        await proxy.ConfigureAsync(
-            Path.Combine(workDir, "__unconfigured__.yaml"),
-            workDir,
-            "capi");
-        await proxy.SetCopilotUserByTokenAsync(DefaultGitHubToken, new CopilotUserConfig(
-            Login: "e2e-test-user",
-            CopilotPlan: "individual_pro",
-            Endpoints: new CopilotUserEndpoints(Api: proxyUrl, Telemetry: "https://localhost:1/telemetry"),
-            AnalyticsTrackingId: "e2e-test-tracking-id"));
+        var context = new E2ETestContext(homeDir, workDir, string.Empty, proxy, repoRoot);
+        try
+        {
+            Directory.CreateDirectory(homeDir);
+            Directory.CreateDirectory(workDir);
 
-        return new E2ETestContext(homeDir, workDir, proxyUrl, proxy, repoRoot);
+            context.ProxyUrl = await proxy.StartAsync();
+            // Creating an in-process fixture applies this URL before its first
+            // test-specific configuration is posted, so early runtime requests need
+            // an empty but valid replay state.
+            await proxy.ConfigureAsync(
+                Path.Combine(workDir, "__unconfigured__.yaml"),
+                workDir,
+                "capi");
+            await proxy.SetCopilotUserByTokenAsync(DefaultGitHubToken, new CopilotUserConfig(
+                Login: "e2e-test-user",
+                CopilotPlan: "individual_pro",
+                Endpoints: new CopilotUserEndpoints(Api: context.ProxyUrl, Telemetry: "https://localhost:1/telemetry"),
+                AnalyticsTrackingId: "e2e-test-tracking-id", Id: 12345));
+
+            return context;
+        }
+        catch (Exception startupError)
+        {
+            try
+            {
+                await context.DisposeAsync();
+            }
+            catch (Exception cleanupError)
+            {
+                throw new AggregateException(startupError, cleanupError);
+            }
+            throw;
+        }
     }
 
     /// <summary>
@@ -330,6 +350,16 @@ public sealed class E2ETestContext : IAsyncDisposable
         var env = environment is not null
             ? environment.ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
             : GetEnvironment();
+        var extensionSdkPath = Environment.GetEnvironmentVariable("COPILOT_EXTENSION_SDK_PATH");
+        var extensionsEnabled = env.TryGetValue("COPILOT_CLI_ENABLED_FEATURE_FLAGS", out var featureFlags)
+            && featureFlags.Split(',')
+                .Select(flag => flag.Trim())
+                .Where(flag => flag.Length > 0)
+                .Contains("EXTENSIONS", StringComparer.OrdinalIgnoreCase);
+        if (extensionsEnabled && !string.IsNullOrEmpty(extensionSdkPath))
+        {
+            options.ExtensionLaunchProvider ??= new TestExtensionLaunchProvider(Path.GetDirectoryName(extensionSdkPath)!);
+        }
 
         // When the test doesn't pin a transport, leave Connection null so
         // CopilotClient honors COPILOT_SDK_DEFAULT_CONNECTION (stdio by default,
@@ -382,6 +412,10 @@ public sealed class E2ETestContext : IAsyncDisposable
         var client = new CopilotClient(options);
         lock (_clientsLock)
         {
+            if (extensionsEnabled && !string.IsNullOrEmpty(extensionSdkPath))
+            {
+                _extensionSdkPaths[client] = extensionSdkPath;
+            }
             if (persistent)
             {
                 _persistentClients.Add(client);
@@ -399,6 +433,7 @@ public sealed class E2ETestContext : IAsyncDisposable
         SessionConfig? config = null)
     {
         config ??= new SessionConfig();
+        ApplyExtensionSdkPath(client, config);
         E2ETestBackendConfiguration.Current.ApplyProvider(config, ProxyUrl);
         var session = await client.CreateSessionAsync(config);
         lock (_clientsLock)
@@ -414,6 +449,7 @@ public sealed class E2ETestContext : IAsyncDisposable
         ResumeSessionConfig? config = null)
     {
         config ??= new ResumeSessionConfig();
+        ApplyExtensionSdkPath(client, config);
         E2ETestBackendConfiguration.Current.ApplyProvider(config, ProxyUrl);
         var session = await client.ResumeSessionAsync(sessionId, config);
         lock (_clientsLock)
@@ -421,6 +457,41 @@ public sealed class E2ETestContext : IAsyncDisposable
             _testSessions.Add(session);
         }
         return session;
+    }
+
+    private void ApplyExtensionSdkPath(CopilotClient client, SessionConfigBase config)
+    {
+        if (!string.IsNullOrEmpty(config.ExtensionSdkPath))
+        {
+            return;
+        }
+        lock (_clientsLock)
+        {
+            if (_extensionSdkPaths.TryGetValue(client, out var extensionSdkPath))
+            {
+                config.ExtensionSdkPath = extensionSdkPath;
+            }
+        }
+    }
+
+    private sealed class TestExtensionLaunchProvider(string cliDistDirectory) : IExtensionLaunchProviderHandler
+    {
+        public Task<ExtensionLaunchProviderResolveResult> ResolveAsync(
+            ExtensionLaunchProviderResolveRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ExtensionLaunchProviderResolveResult
+            {
+                Launch = new ExtensionLaunchProfile
+                {
+                    Executable = "node",
+                    Args = [Path.Join(cliDistDirectory, "preloads", "extension_bootstrap.mjs")],
+                    Env = new Dictionary<string, string>
+                    {
+                        ["COPILOT_CLI_DIST_DIR"] = cliDistDirectory,
+                        ["EXTENSION_PATH"] = request.ModulePath,
+                    },
+                },
+            });
     }
 
     internal void PrepareForTest()

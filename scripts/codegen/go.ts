@@ -8,6 +8,7 @@
 
 import { execFile } from "child_process";
 import fs from "fs/promises";
+import { realpathSync } from "node:fs";
 import type { JSONSchema7 } from "json-schema";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -58,6 +59,7 @@ import {
     type RpcMethod,
     type SessionEventEnvelopeProperty,
 } from "./utils.js";
+import { validateLegacyRequests, validateLegacyDefinitions } from "./legacy-parameters.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -409,8 +411,8 @@ async function formatGoFile(filePath: string): Promise<void> {
     try {
         await execFileAsync("go", ["fmt", filePath]);
         console.log(`  ✓ Formatted with go fmt`);
-    } catch {
-        // go fmt not available, skip
+    } catch (cause) {
+        throw new Error(`Failed to format ${filePath}. Go is required for SDK generation; install the version specified in go/go.mod and ensure go is on PATH.`, { cause });
     }
 }
 
@@ -489,6 +491,9 @@ function goParamsTypeName(method: RpcMethod): string {
     const fallback = goRequestFallbackName(method);
     if (method.rpcMethod.startsWith("session.") && method.params?.$ref) {
         return fallback;
+    }
+    if (method.params?.$ref) {
+        return toPascalCase(refTypeName(method.params.$ref, rpcDefinitions));
     }
     return getRpcSchemaTypeName(getMethodParamsSchema(method), fallback);
 }
@@ -3009,8 +3014,54 @@ function emitGoAlias(typeName: string, schema: JSONSchema7, ctx: GoCodegenCtx): 
     ctx.structs.push(lines.join("\n"));
 }
 
+/**
+ * A named definition is wire-nullable when its `anyOf` pairs a single `$ref`
+ * with a real `type: "null"` branch. The `{ "not": {} }` omission sentinel is
+ * deliberately excluded: it means "absent", not "null on the wire". Returns
+ * the referenced definition name, or undefined when the shape does not match.
+ */
+function goWireNullableRefName(schema: JSONSchema7): string | undefined {
+    if (!Array.isArray(schema.anyOf)) return undefined;
+    const branches = schema.anyOf.filter((branch): branch is JSONSchema7 => typeof branch === "object" && branch !== null);
+    if (branches.length !== schema.anyOf.length) return undefined;
+    if (!branches.some((branch) => branch.type === "null")) return undefined;
+    const refBranches = branches.filter((branch) => typeof branch.$ref === "string");
+    if (refBranches.length !== 1 || branches.length !== 2) return undefined;
+    return refBranches[0].$ref!.split("/").pop();
+}
+
+/**
+ * Emits a nullable result definition as a pointer alias so the exported name
+ * matches what the corresponding method already returns and a JSON `null`
+ * cannot decode into a zero value.
+ */
+function emitGoNullableRefAlias(typeName: string, refName: string, schema: JSONSchema7, ctx: GoCodegenCtx): void {
+    if (ctx.generatedNames.has(typeName)) return;
+    ctx.generatedNames.add(typeName);
+
+    const lines: string[] = [];
+    if (schema.description) {
+        pushGoCommentForContext(lines, schema.description, ctx);
+    }
+    if (isSchemaExperimental(schema)) {
+        pushGoExperimentalTypeComment(lines, typeName, ctx);
+    }
+    if (isSchemaDeprecated(schema)) {
+        pushGoCommentForContext(lines, `Deprecated: ${typeName} is deprecated and will be removed in a future version.`, ctx);
+    }
+    lines.push(`type ${typeName} = *${goDefinitionName(refName)}`);
+    ctx.structs.push(lines.join("\n"));
+}
+
 function emitGoRpcDefinition(definitionName: string, schema: JSONSchema7, ctx: GoCodegenCtx): string {
     const typeName = goDefinitionName(definitionName);
+
+    const wireNullableRef = goWireNullableRefName(schema);
+    if (wireNullableRef) {
+        emitGoNullableRefAlias(typeName, wireNullableRef, schema, ctx);
+        return typeName;
+    }
+
     const effectiveSchema = resolveObjectSchema(schema, ctx.definitions) ?? resolveSchema(schema, ctx.definitions) ?? schema;
 
     if (isStringEnumDefinition(effectiveSchema)) {
@@ -3850,6 +3901,15 @@ async function generateRpc(schemaPath?: string): Promise<void> {
     // Build a combined definition map, including shared API definitions plus
     // method-specific request/result wrapper types.
     rpcDefinitions = collectDefinitionCollections(schema as Record<string, unknown>);
+    // Added inputs are optional pointer fields of the same request struct, so keyed literals are unchanged.
+    validateLegacyRequests(
+        schema,
+        (node) => collectRpcMethods(node),
+        getMethodParamsSchema,
+        (method) => !!method.params && !!getNullableInner(method.params)
+    );
+    // Response structs gain optional pointer fields, so keyed literals are unchanged.
+    validateLegacyDefinitions(rpcDefinitions);
     const allDefinitions: Record<string, JSONSchema7> = {
         ...Object.fromEntries(
             Object.entries(rpcDefinitions.$defs ?? {}).filter(([, value]) => typeof value === "object" && value !== null)
@@ -4265,6 +4325,12 @@ function emitMethod(lines: string[], receiver: string, name: string, method: Rpc
         }
         lines.push(`\traw, err := ${clientRef}.Request(ctx, "${method.rpcMethod}", req)`);
     } else {
+        if (method.rpcMethod === "managedSettings.resolve") {
+            // A typed nil inside Request's any argument marshals as null, not omitted params.
+            lines.push(`\tif ${paramsRef} == nil {`);
+            lines.push(`\t\t${paramsRef} = &${paramsType}{}`);
+            lines.push(`\t}`);
+        }
         const arg = hasParams ? paramsRef : "nil";
         lines.push(`\traw, err := ${clientRef}.Request(ctx, "${method.rpcMethod}", ${arg})`);
     }
@@ -4279,11 +4345,11 @@ function emitMethod(lines: string[], receiver: string, name: string, method: Rpc
         lines.push(`\t}`);
         lines.push(`\treturn result, nil`);
     } else {
-        lines.push(`\tvar result ${resultType}`);
+        lines.push(`\tvar result ${nullableInner ? "*" : ""}${resultType}`);
         lines.push(`\tif err := json.Unmarshal(raw, &result); err != nil {`);
         lines.push(`\t\treturn nil, err`);
         lines.push(`\t}`);
-        lines.push(`\treturn &result, nil`);
+        lines.push(`\treturn ${nullableInner ? "" : "&"}result, nil`);
     }
     lines.push(`}`);
     lines.push(``);
@@ -4419,7 +4485,7 @@ export function emitClientSessionApiRegistration(lines: string[], clientSchema: 
     lines.push(``);
 }
 
-function emitClientGlobalApiRegistration(lines: string[], clientSchema: Record<string, unknown>, resolveType: (name: string) => string, unionInfos: Map<string, GoDiscriminatedUnionInfo>): void {
+export function emitClientGlobalApiRegistration(lines: string[], clientSchema: Record<string, unknown>, resolveType: (name: string) => string, unionInfos: Map<string, GoDiscriminatedUnionInfo>): void {
     const groups = collectClientGroups(clientSchema);
 
     for (const { groupName, groupNode, methods } of groups) {
@@ -4569,7 +4635,7 @@ async function generate(sessionSchemaPath?: string, apiSchemaPath?: string): Pro
 
 const __filename = fileURLToPath(import.meta.url);
 
-if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(__filename)) {
     const sessionArg = process.argv[2] || undefined;
     const apiArg = process.argv[3] || undefined;
     generate(sessionArg, apiArg).catch((err) => {

@@ -8,9 +8,14 @@
     "include": [
         "src/**/*",
         "test/dependency-policy.test.ts",
+        "test/copilot-request-handler.test.ts",
+        "test/connectors.test.ts",
         "test/ffiRuntimeHost.test.ts",
         "test/session-event-types.test.ts",
-        "test/message-source.test.ts"
+        "test/session-config-types.test.ts",
+        "test/sandbox-config.test.ts",
+        "test/message-source.test.ts",
+        "test/legacy-request-compatibility.test.ts"
     ],
     "exclude": ["node_modules", "dist"]
 }

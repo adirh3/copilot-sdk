@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CopilotClient } from "../src/client.js";
 import { approveAll } from "../src/index.js";
-import { createCanvas, joinSession } from "../src/extension.js";
+import { createCanvas, defineWorkflow, joinSession } from "../src/extension.js";
 import { defaultJoinSessionPermissionHandler } from "../src/types.js";
 
 describe("joinSession", () => {
@@ -78,6 +78,23 @@ describe("joinSession", () => {
         // An empty list means the same as omitting the option, so it must not put
         // an environment request on the wire either.
         expect(resumeForExtension.mock.calls[1]![3]).toBeUndefined();
+    });
+
+    it("forwards workflow contributions independently", async () => {
+        process.env.SESSION_ID = "session-123";
+        const resumeForExtension = vi
+            .spyOn(CopilotClient.prototype, "resumeSessionForExtension")
+            .mockResolvedValue({} as any);
+        const workflow = defineWorkflow({
+            meta: { name: "review", description: "Review", phases: [] },
+            run: async () => null,
+        });
+
+        await joinSession({ workflows: [workflow] });
+
+        expect(resumeForExtension.mock.calls[0]![2]).toEqual({
+            workflows: [workflow],
+        });
     });
 
     it("exports the canvas helper from the extension surface", () => {

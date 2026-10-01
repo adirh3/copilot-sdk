@@ -33,12 +33,12 @@ public final class SessionRpc {
     public final SessionSandboxApi sandbox;
     /** API methods for the {@code gitHubAuth} namespace. */
     public final SessionGitHubAuthApi gitHubAuth;
+    /** API methods for the {@code accounts} namespace. */
+    public final SessionAccountsApi accounts;
     /** API methods for the {@code debug} namespace. */
     public final SessionDebugApi debug;
     /** API methods for the {@code canvas} namespace. */
     public final SessionCanvasApi canvas;
-    /** API methods for the {@code factory} namespace. */
-    public final SessionFactoryApi factory;
     /** API methods for the {@code workflow} namespace. */
     public final SessionWorkflowApi workflow;
     /** API methods for the {@code model} namespace. */
@@ -57,6 +57,8 @@ public final class SessionRpc {
     public final SessionCompletionsApi completions;
     /** API methods for the {@code instructions} namespace. */
     public final SessionInstructionsApi instructions;
+    /** API methods for the {@code customizations} namespace. */
+    public final SessionCustomizationsApi customizations;
     /** API methods for the {@code fleet} namespace. */
     public final SessionFleetApi fleet;
     /** API methods for the {@code agent} namespace. */
@@ -67,6 +69,10 @@ public final class SessionRpc {
     public final SessionSkillsApi skills;
     /** API methods for the {@code mcp} namespace. */
     public final SessionMcpApi mcp;
+    /** API methods for the {@code diagnostics} namespace. */
+    public final SessionDiagnosticsApi diagnostics;
+    /** API methods for the {@code connectors} namespace. */
+    public final SessionConnectorsApi connectors;
     /** API methods for the {@code managedSettings} namespace. */
     public final SessionManagedSettingsApi managedSettings;
     /** API methods for the {@code plugins} namespace. */
@@ -125,9 +131,9 @@ public final class SessionRpc {
         this.sessionId = sessionId;
         this.sandbox = new SessionSandboxApi(caller, sessionId);
         this.gitHubAuth = new SessionGitHubAuthApi(caller, sessionId);
+        this.accounts = new SessionAccountsApi(caller, sessionId);
         this.debug = new SessionDebugApi(caller, sessionId);
         this.canvas = new SessionCanvasApi(caller, sessionId);
-        this.factory = new SessionFactoryApi(caller, sessionId);
         this.workflow = new SessionWorkflowApi(caller, sessionId);
         this.model = new SessionModelApi(caller, sessionId);
         this.mode = new SessionModeApi(caller, sessionId);
@@ -137,11 +143,14 @@ public final class SessionRpc {
         this.autopilotObjective = new SessionAutopilotObjectiveApi(caller, sessionId);
         this.completions = new SessionCompletionsApi(caller, sessionId);
         this.instructions = new SessionInstructionsApi(caller, sessionId);
+        this.customizations = new SessionCustomizationsApi(caller, sessionId);
         this.fleet = new SessionFleetApi(caller, sessionId);
         this.agent = new SessionAgentApi(caller, sessionId);
         this.tasks = new SessionTasksApi(caller, sessionId);
         this.skills = new SessionSkillsApi(caller, sessionId);
         this.mcp = new SessionMcpApi(caller, sessionId);
+        this.diagnostics = new SessionDiagnosticsApi(caller, sessionId);
+        this.connectors = new SessionConnectorsApi(caller, sessionId);
         this.managedSettings = new SessionManagedSettingsApi(caller, sessionId);
         this.plugins = new SessionPluginsApi(caller, sessionId);
         this.provider = new SessionProviderApi(caller, sessionId);

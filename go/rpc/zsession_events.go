@@ -94,30 +94,22 @@ const (
 	SessionEventTypeExitPlanModeRequested       SessionEventType = "exit_plan_mode.requested"
 	SessionEventTypeExternalToolCompleted       SessionEventType = "external_tool.completed"
 	SessionEventTypeExternalToolRequested       SessionEventType = "external_tool.requested"
-	// Experimental: SessionEventTypeFactoryRunSettled identifies an experimental event that may
-	// change or be removed.
-	SessionEventTypeFactoryRunSettled SessionEventType = "factory.run_settled"
-	// Experimental: SessionEventTypeFactoryRunStarted identifies an experimental event that may
-	// change or be removed.
-	SessionEventTypeFactoryRunStarted SessionEventType = "factory.run_started"
-	// Experimental: SessionEventTypeFactoryRunUpdated identifies an experimental event that may
-	// change or be removed.
-	SessionEventTypeFactoryRunUpdated          SessionEventType = "factory.run_updated"
-	SessionEventTypeHookEnd                    SessionEventType = "hook.end"
-	SessionEventTypeHookProgress               SessionEventType = "hook.progress"
-	SessionEventTypeHookStart                  SessionEventType = "hook.start"
-	SessionEventTypeMCPAppToolCallComplete     SessionEventType = "mcp_app.tool_call_complete"
-	SessionEventTypeMCPHeadersRefreshCompleted SessionEventType = "mcp.headers_refresh_completed"
-	SessionEventTypeMCPHeadersRefreshRequired  SessionEventType = "mcp.headers_refresh_required"
-	SessionEventTypeMCPOauthCompleted          SessionEventType = "mcp.oauth_completed"
-	SessionEventTypeMCPOauthRequired           SessionEventType = "mcp.oauth_required"
-	SessionEventTypeMCPPromptsListChanged      SessionEventType = "mcp.prompts.list_changed"
-	SessionEventTypeMCPResourcesListChanged    SessionEventType = "mcp.resources.list_changed"
-	SessionEventTypeMCPToolsListChanged        SessionEventType = "mcp.tools.list_changed"
-	SessionEventTypeModelCallFailure           SessionEventType = "model.call_failure"
-	SessionEventTypeModelCallFinished          SessionEventType = "model.call_finished"
-	SessionEventTypeModelCallStart             SessionEventType = "model.call_start"
-	SessionEventTypePendingMessagesModified    SessionEventType = "pending_messages.modified"
+	SessionEventTypeHookEnd                     SessionEventType = "hook.end"
+	SessionEventTypeHookProgress                SessionEventType = "hook.progress"
+	SessionEventTypeHookStart                   SessionEventType = "hook.start"
+	SessionEventTypeMCPAppToolCallComplete      SessionEventType = "mcp_app.tool_call_complete"
+	SessionEventTypeMCPHeadersRefreshCompleted  SessionEventType = "mcp.headers_refresh_completed"
+	SessionEventTypeMCPHeadersRefreshRequired   SessionEventType = "mcp.headers_refresh_required"
+	SessionEventTypeMCPOauthCompleted           SessionEventType = "mcp.oauth_completed"
+	SessionEventTypeMCPOauthRequired            SessionEventType = "mcp.oauth_required"
+	SessionEventTypeMCPPromptsListChanged       SessionEventType = "mcp.prompts.list_changed"
+	SessionEventTypeMCPResourcesListChanged     SessionEventType = "mcp.resources.list_changed"
+	SessionEventTypeMCPToolsListChanged         SessionEventType = "mcp.tools.list_changed"
+	SessionEventTypeModelCallFailure            SessionEventType = "model.call_failure"
+	SessionEventTypeModelCallFinalResult        SessionEventType = "model.call_final_result"
+	SessionEventTypeModelCallFinished           SessionEventType = "model.call_finished"
+	SessionEventTypeModelCallStart              SessionEventType = "model.call_start"
+	SessionEventTypePendingMessagesModified     SessionEventType = "pending_messages.modified"
 	// Experimental: SessionEventTypePermissionAssentDetected identifies an experimental event
 	// that may change or be removed.
 	SessionEventTypePermissionAssentDetected SessionEventType = "permission.assentDetected"
@@ -214,6 +206,7 @@ const (
 	SessionEventTypeSessionMCPServerStatusChanged  SessionEventType = "session.mcp_server_status_changed"
 	SessionEventTypeSessionModeChanged             SessionEventType = "session.mode_changed"
 	SessionEventTypeSessionModelChange             SessionEventType = "session.model_change"
+	SessionEventTypeSessionModelDeselected         SessionEventType = "session.model_deselected"
 	SessionEventTypeSessionModeNoticeDelivered     SessionEventType = "session.mode_notice_delivered"
 	SessionEventTypeSessionPermissionRecovery      SessionEventType = "session.permission_recovery"
 	// Experimental: SessionEventTypeSessionPermissionsChanged identifies an experimental event
@@ -269,6 +262,15 @@ const (
 	SessionEventTypeUserInputCompleted SessionEventType = "user_input.completed"
 	SessionEventTypeUserInputRequested SessionEventType = "user_input.requested"
 	SessionEventTypeUserMessage        SessionEventType = "user.message"
+	// Experimental: SessionEventTypeWorkflowRunSettled identifies an experimental event that
+	// may change or be removed.
+	SessionEventTypeWorkflowRunSettled SessionEventType = "workflow.run_settled"
+	// Experimental: SessionEventTypeWorkflowRunStarted identifies an experimental event that
+	// may change or be removed.
+	SessionEventTypeWorkflowRunStarted SessionEventType = "workflow.run_started"
+	// Experimental: SessionEventTypeWorkflowRunUpdated identifies an experimental event that
+	// may change or be removed.
+	SessionEventTypeWorkflowRunUpdated SessionEventType = "workflow.run_updated"
 )
 
 // A detected loss of a previously cached prompt prefix
@@ -638,9 +640,12 @@ func (*SessionContextClearedData) Type() SessionEventType {
 
 // Conversation compaction results including success status, metrics, and optional error details
 type SessionCompactionCompleteData struct {
-	// Authoritative active-factory reminder appended to the compacted context
+	// Legacy active-workflow reminder retained for replay compatibility
 	// Internal: ActiveFactorySummary is part of the SDK's internal API surface and is not intended for external use.
 	ActiveFactorySummary *string `json:"activeFactorySummary,omitempty"`
+	// Authoritative active-workflow reminder appended to the compacted context
+	// Internal: ActiveWorkflowSummary is part of the SDK's internal API surface and is not intended for external use.
+	ActiveWorkflowSummary *string `json:"activeWorkflowSummary,omitempty"`
 	// Canonical model identifier used for model-specific behavior when replaying compaction
 	BehaviorModelID *string `json:"behaviorModelId,omitempty"`
 	// Checkpoint snapshot number created for recovery
@@ -820,6 +825,38 @@ func (*MCPHeadersRefreshRequiredData) Type() SessionEventType {
 	return SessionEventTypeMCPHeadersRefreshRequired
 }
 
+// Effective enterprise managed settings and contributing channels. Session events report applied policy; sessionless resolve reports an account/device snapshot, and compose reports a non-applying preview of candidate documents. Device values take precedence over server values, then the policy helper, per ordinary key, while permissions compose restrictively. Session-local SDK-client policy is included only in session results. Marked experimental while the managed-settings surface stabilizes.
+// Experimental: SessionManagedSettingsResolvedData is part of an experimental API and may change or be removed.
+type SessionManagedSettingsResolvedData struct {
+	// Whether enterprise policy disables bypass-permissions ("yolo") mode for this session. Deny-wins across layers, and forced on when `failClosed` is true.
+	BypassPermissionsDisabled bool `json:"bypassPermissionsDisabled"`
+	// Whether a session-local permissions layer injected by the SDK host was present
+	ClientManaged *bool `json:"clientManaged,omitempty"`
+	// Whether an actual device MDM/plist/registry/file managed-settings layer was present
+	DeviceManaged bool `json:"deviceManaged"`
+	// Whether managed policy could not be determined (e.g. a failed server fetch) and the session fell back to the fail-closed restriction. When true, restrictions such as disabling bypass-permissions are enforced even though `settings` may be absent.
+	FailClosed bool `json:"failClosed"`
+	// The setting keys under enterprise management in the effective managed settings (e.g. `model`, `enabledPlugins`, `permissions`). Empty when no managed settings are in force.
+	ManagedKeys []string `json:"managedKeys"`
+	// Whether at least two managed sources supplied permission allowlists, so enforcement intersects them and the flattened settings payload omits `permissions.allow`.
+	PermissionsAllowIntersected *bool `json:"permissionsAllowIntersected,omitempty"`
+	// Whether the policy-helper managed-settings layer was present. The policy helper is the weakest channel: it fills keys no enterprise source set and can never replace one.
+	PolicyHelperManaged *bool `json:"policyHelperManaged,omitempty"`
+	// Whether the effective sandbox policy forces the sandbox on *only* because managed policy could not be determined, rather than because the policy requires it. Lets clients tell a user whose `--no-sandbox` was overridden that the sandbox stayed on as a fail-closed fallback, instead of attributing it to an administrator who set no such policy.
+	SandboxEnabledByUndeterminedPolicy *bool `json:"sandboxEnabledByUndeterminedPolicy,omitempty"`
+	// Whether the server (account/org) managed-settings layer was present
+	ServerManaged bool `json:"serverManaged"`
+	// The effective (resolved) managed settings values, so clients can render exactly what is enforced. Absent when no managed policy is in force.
+	Settings any `json:"settings,omitempty"`
+	// Channel summary: `server`, `device`, `client`, or `policyHelper` when exactly one channel contributed; `mixed` when multiple channels contributed; otherwise `none`. Consult the per-channel booleans for exact provenance.
+	Source ManagedSettingsResolvedSource `json:"source"`
+}
+
+func (*SessionManagedSettingsResolvedData) sessionEventData() {}
+func (*SessionManagedSettingsResolvedData) Type() SessionEventType {
+	return SessionEventTypeSessionManagedSettingsResolved
+}
+
 // Elicitation request completion with the user's response
 type ElicitationCompletedData struct {
 	// The user action: "accept" (submitted form), "decline" (explicitly refused), or "cancel" (dismissed)
@@ -879,49 +916,17 @@ func (*PendingMessagesModifiedData) Type() SessionEventType {
 	return SessionEventTypePendingMessagesModified
 }
 
-// Enterprise managed-settings resolution: the effective managed settings the session applied and which channels contributed, so SDK clients can show users what is enterprise-managed. Fires whenever managed policy is (re)applied — at session start, on resume, and on account switch. This is an ephemeral live snapshot (delivered to subscribers but not persisted to the session event log), because at session start it resolves before `session.start` is emitted. Device values take precedence over server values, then the policy helper, per ordinary key, while permissions compose restrictively across device, server, policy-helper, and SDK-client layers. The account-scoped `getManagedSettings()` API does not include session-local client injection. Marked experimental while the managed-settings surface stabilizes.
-// Experimental: SessionManagedSettingsResolvedData is part of an experimental API and may change or be removed.
-type SessionManagedSettingsResolvedData struct {
-	// Whether enterprise policy disables bypass-permissions ("yolo") mode for this session. Deny-wins across layers, and forced on when `failClosed` is true.
-	BypassPermissionsDisabled bool `json:"bypassPermissionsDisabled"`
-	// Whether a session-local permissions layer injected by the SDK host was present
-	ClientManaged *bool `json:"clientManaged,omitempty"`
-	// Whether an actual device MDM/plist/registry/file managed-settings layer was present
-	DeviceManaged bool `json:"deviceManaged"`
-	// Whether managed policy could not be determined (e.g. a failed server fetch) and the session fell back to the fail-closed restriction. When true, restrictions such as disabling bypass-permissions are enforced even though `settings` may be absent.
-	FailClosed bool `json:"failClosed"`
-	// The setting keys under enterprise management in the effective managed settings (e.g. `model`, `enabledPlugins`, `permissions`). Empty when no managed settings are in force.
-	ManagedKeys []string `json:"managedKeys"`
-	// Whether at least two managed sources supplied permission allowlists, so enforcement intersects them and the flattened settings payload omits `permissions.allow`.
-	PermissionsAllowIntersected *bool `json:"permissionsAllowIntersected,omitempty"`
-	// Whether the policy-helper managed-settings layer was present. The policy helper is the weakest channel: it fills keys no enterprise source set and can never replace one.
-	PolicyHelperManaged *bool `json:"policyHelperManaged,omitempty"`
-	// Whether the effective sandbox policy forces the sandbox on *only* because managed policy could not be determined, rather than because the policy requires it. Lets clients tell a user whose `--no-sandbox` was overridden that the sandbox stayed on as a fail-closed fallback, instead of attributing it to an administrator who set no such policy.
-	SandboxEnabledByUndeterminedPolicy *bool `json:"sandboxEnabledByUndeterminedPolicy,omitempty"`
-	// Whether the server (account/org) managed-settings layer was present
-	ServerManaged bool `json:"serverManaged"`
-	// The effective (resolved) managed settings values, so clients can render exactly what is enforced. Absent when no managed policy is in force.
-	Settings any `json:"settings,omitempty"`
-	// Channel summary: `server`, `device`, `client`, or `policyHelper` when exactly one channel contributed; `mixed` when multiple channels contributed; otherwise `none`. Consult the per-channel booleans for exact provenance.
-	Source ManagedSettingsResolvedSource `json:"source"`
-}
-
-func (*SessionManagedSettingsResolvedData) sessionEventData() {}
-func (*SessionManagedSettingsResolvedData) Type() SessionEventType {
-	return SessionEventTypeSessionManagedSettingsResolved
-}
-
-// Ephemeral invalidation signal for a changed factory run.
-// Experimental: FactoryRunUpdatedData is part of an experimental API and may change or be removed.
-type FactoryRunUpdatedData struct {
+// Ephemeral invalidation signal for a changed workflow run.
+// Experimental: WorkflowRunUpdatedData is part of an experimental API and may change or be removed.
+type WorkflowRunUpdatedData struct {
 	// Monotonic revision now available for the run.
 	Revision int64 `json:"revision"`
-	// Factory run identifier.
+	// Workflow run identifier.
 	RunID string `json:"runId"`
 }
 
-func (*FactoryRunUpdatedData) sessionEventData()      {}
-func (*FactoryRunUpdatedData) Type() SessionEventType { return SessionEventTypeFactoryRunUpdated }
+func (*WorkflowRunUpdatedData) sessionEventData()      {}
+func (*WorkflowRunUpdatedData) Type() SessionEventType { return SessionEventTypeWorkflowRunUpdated }
 
 // Ephemeral progress update from a running hook process
 type HookProgressData struct {
@@ -934,39 +939,39 @@ type HookProgressData struct {
 func (*HookProgressData) sessionEventData()      {}
 func (*HookProgressData) Type() SessionEventType { return SessionEventTypeHookProgress }
 
-// Ephemeral signal that a factory run attempt began executing.
-// Experimental: FactoryRunStartedData is part of an experimental API and may change or be removed.
-type FactoryRunStartedData struct {
+// Ephemeral signal that a workflow run attempt began executing.
+// Experimental: WorkflowRunStartedData is part of an experimental API and may change or be removed.
+type WorkflowRunStartedData struct {
 	// Attempt number this start committed; a resumed run increments it.
 	Attempt int64 `json:"attempt"`
-	// Name of the factory this run executes. Low cardinality by construction.
-	FactoryName string `json:"factoryName"`
-	// Identifier of the factory run that started.
+	// Identifier of the workflow run that started.
 	RunID string `json:"runId"`
+	// Name of the workflow this run executes. Low cardinality by construction.
+	WorkflowName string `json:"workflowName"`
 }
 
-func (*FactoryRunStartedData) sessionEventData()      {}
-func (*FactoryRunStartedData) Type() SessionEventType { return SessionEventTypeFactoryRunStarted }
+func (*WorkflowRunStartedData) sessionEventData()      {}
+func (*WorkflowRunStartedData) Type() SessionEventType { return SessionEventTypeWorkflowRunStarted }
 
-// Ephemeral signal that a factory run reached a terminal status.
-// Experimental: FactoryRunSettledData is part of an experimental API and may change or be removed.
-type FactoryRunSettledData struct {
+// Ephemeral signal that a workflow run reached a terminal status.
+// Experimental: WorkflowRunSettledData is part of an experimental API and may change or be removed.
+type WorkflowRunSettledData struct {
 	// AI credits this run consumed, in nano-AIU.
 	ConsumedNanoAiu int64 `json:"consumedNanoAiu"`
 	// Subagents this run consumed against its limits.
 	ConsumedSubagents int64 `json:"consumedSubagents"`
 	// Active milliseconds accumulated across every attempt of this run.
 	ElapsedMs int64 `json:"elapsedMs"`
-	// Typed failure class recorded on the run, when it failed with one (e.g. `factory_limit_reached`).
+	// Typed failure class recorded on the run, when it failed with one (e.g. `workflow_limit_reached`).
 	FailureType *string `json:"failureType,omitempty"`
-	// Identifier of the factory run that settled.
+	// Identifier of the workflow run that settled.
 	RunID string `json:"runId"`
 	// Terminal status the run committed.
-	Status FactoryRunSettledStatus `json:"status"`
+	Status WorkflowRunSettledStatus `json:"status"`
 }
 
-func (*FactoryRunSettledData) sessionEventData()      {}
-func (*FactoryRunSettledData) Type() SessionEventType { return SessionEventTypeFactoryRunSettled }
+func (*WorkflowRunSettledData) sessionEventData()      {}
+func (*WorkflowRunSettledData) Type() SessionEventType { return SessionEventTypeWorkflowRunSettled }
 
 // Error details for timeline display including message and optional diagnostic information
 type SessionErrorData struct {
@@ -1061,6 +1066,9 @@ type AssistantFusionPhaseCompletedData struct {
 	// Projection action for the exact internal message.
 	// Internal: ProjectionMode is part of the SDK's internal API surface and is not intended for external use.
 	ProjectionMode *FusionProjectionMode `json:"projectionMode,omitempty"`
+	// Explicit reasoning effort selected for this phase, if supplied.
+	// Experimental: ReasoningEffort is part of an experimental API and may change or be removed.
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 	// Semantic role assigned to the completed phase.
 	Role string `json:"role"`
 	// Terminal request held outside canonical state until selected by the final commit.
@@ -1170,6 +1178,9 @@ type AssistantFusionPhaseFailedData struct {
 	PhaseKind FusionPhaseKind `json:"phaseKind"`
 	// Stable machine-readable reason for the phase failure.
 	Reason string `json:"reason"`
+	// Explicit reasoning effort selected for this phase, if supplied.
+	// Experimental: ReasoningEffort is part of an experimental API and may change or be removed.
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 	// Semantic role assigned to the failed phase.
 	Role string `json:"role"`
 	// Durable outcome status of the phase.
@@ -1188,6 +1199,9 @@ func (*AssistantFusionPhaseFailedData) Type() SessionEventType {
 type SessionFusionResolvedData struct {
 	// Version of the validated HydraFusion event contract.
 	ContractVersion int64 `json:"contractVersion"`
+	// Planned Critique phase identities, including independent critics with repeated model IDs. May be absent in older events; consumers then use secondaryModel for the legacy critic.
+	// Experimental: Critics is part of an experimental API and may change or be removed.
+	Critics []FusionCritic `json:"critics,omitzero"`
 	// Concrete model used when the planned primary model cannot execute.
 	FallbackModel string `json:"fallbackModel"`
 	// Router recommendation controlling reuse or rerouting on later turns.
@@ -1196,6 +1210,12 @@ type SessionFusionResolvedData struct {
 	FollowUpModel string `json:"followUpModel"`
 	// Stable identifier for the resolved HydraFusion turn.
 	FusionID string `json:"fusionId"`
+	// Short human-readable summary of the selected workflow, suitable for immediate client display after routing. May be absent in older durable events; omit the explanation or derive one from pattern and phasePlan. Display text, not a stable machine-readable value.
+	// Experimental: Hint is part of an experimental API and may change or be removed.
+	Hint *string `json:"hint,omitempty"`
+	// Concrete model selected for Cascade escalation-gate calls, when required.
+	// Experimental: JudgeModel is part of an experimental API and may change or be removed.
+	JudgeModel *string `json:"judgeModel,omitempty"`
 	// Version of the executable model universe used for selection.
 	ModelUniverseVersion *string `json:"modelUniverseVersion,omitempty"`
 	// Validated orchestration pattern selected for the turn.
@@ -1211,6 +1231,9 @@ type SessionFusionResolvedData struct {
 	PolicyVersion *string `json:"policyVersion,omitempty"`
 	// Concrete model selected for the primary solver phase.
 	PrimaryModel string `json:"primaryModel"`
+	// Concrete model selected for Cascade repair, when required.
+	// Experimental: RepairModel is part of an experimental API and may change or be removed.
+	RepairModel *string `json:"repairModel,omitempty"`
 	// Router implementation that supplied the plan.
 	RouteSource *string `json:"routeSource,omitempty"`
 	// Elapsed time in milliseconds required to resolve and validate the route.
@@ -1223,7 +1246,7 @@ type SessionFusionResolvedData struct {
 	RuleName *string `json:"ruleName,omitempty"`
 	// Validated capability scores used to select the route.
 	Scores *FusionScores `json:"scores,omitempty"`
-	// Concrete model selected for the review or judge phase, when required.
+	// Concrete model selected for Critique review, or the legacy Cascade judge/repair model when role-specific fields are absent.
 	SecondaryModel *string `json:"secondaryModel"`
 	// Synthetic HydraFusion model selected for the session.
 	SyntheticModel string `json:"syntheticModel"`
@@ -1251,6 +1274,9 @@ type AssistantFusionPhaseStartedData struct {
 	PhaseID string `json:"phaseId"`
 	// Kind of phase being executed.
 	PhaseKind FusionPhaseKind `json:"phaseKind"`
+	// Explicit reasoning effort selected for this phase, if supplied.
+	// Experimental: ReasoningEffort is part of an experimental API and may change or be removed.
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 	// Semantic role assigned to the phase.
 	Role string `json:"role"`
 }
@@ -1351,6 +1377,8 @@ type ModelCallFailureData struct {
 	MaxPromptTokens *int64 `json:"maxPromptTokens,omitempty"`
 	// Model identifier used for the failed API call
 	Model *string `json:"model,omitempty"`
+	// Parent task tool call ID when this failed model call belongs to a sub-agent
+	ParentToolCallID *string `json:"parentToolCallId,omitempty"`
 	// GitHub request tracing ID (x-github-request-id header) for server-side log correlation
 	ProviderCallID *string `json:"providerCallId,omitempty"`
 	// Per-quota usage snapshots parsed from the failed response's quota headers, keyed by quota identifier. Present when the error response carried quota headers (e.g. a 402 once the additional spend limit is reached) so the UI can refresh the quota display on failure.
@@ -1394,35 +1422,7 @@ type ModelCallFinishedData struct {
 func (*ModelCallFinishedData) sessionEventData()      {}
 func (*ModelCallFinishedData) Type() SessionEventType { return SessionEventTypeModelCallFinished }
 
-// Freezes a blinded contextual authorization proposal whose verbatim human span was deterministically bound to the immediately preceding blocked permission request. The event carries no action fields; replay re-derives the exact action from the earlier permission request and mints a one-shot message grant only when the binding and span still verify.
-// Experimental: PermissionContextualAuthorizationData is part of an experimental API and may change or be removed.
-type PermissionContextualAuthorizationData struct {
-	// Whether the contextual human span granted or denied authority.
-	// Experimental: Polarity is part of an experimental API and may change or be removed.
-	Polarity PermissionMessageAuthorizationPolarity `json:"polarity"`
-	// Deterministic identity of the contextual message grant.
-	// Experimental: RecordID is part of an experimental API and may change or be removed.
-	RecordID string `json:"recordId"`
-	// Original blocked permission request selected by deterministic event ordering, never by the extraction model.
-	// Experimental: RequestID is part of an experimental API and may change or be removed.
-	RequestID string `json:"requestId"`
-	// End byte offset of the contextual decision span within the turn.
-	// Experimental: SpanEnd is part of an experimental API and may change or be removed.
-	SpanEnd int64 `json:"spanEnd"`
-	// Start byte offset of the contextual decision span within the turn.
-	// Experimental: SpanStart is part of an experimental API and may change or be removed.
-	SpanStart int64 `json:"spanStart"`
-	// Human turn containing the contextual decision.
-	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
-	TurnIndex int64 `json:"turnIndex"`
-}
-
-func (*PermissionContextualAuthorizationData) sessionEventData() {}
-func (*PermissionContextualAuthorizationData) Type() SessionEventType {
-	return SessionEventTypePermissionContextualAuthorization
-}
-
-// Freezes one blinded, verbatim-verified authorization claim the runtime minted from a human user message, so a resumed session re-establishes the same grant deterministically instead of re-running the extraction model. This mints no authority on its own: it records what a blinded proposer pointed at and the trusted discriminator the runtime established, and deterministic establishment runs on replay. Persisted so recorded authority survives compaction and process resume.
+// Historical decode-only claim from the retired Assisted Permissions authorization extractor. Current runtimes preserve the payload but do not establish authority from it.
 // Experimental: PermissionMessageAuthorizationData is part of an experimental API and may change or be removed.
 type PermissionMessageAuthorizationData struct {
 	// The kind of effect authorized, as an action-class identifier.
@@ -1457,6 +1457,101 @@ type PermissionMessageAuthorizationData struct {
 func (*PermissionMessageAuthorizationData) sessionEventData() {}
 func (*PermissionMessageAuthorizationData) Type() SessionEventType {
 	return SessionEventTypePermissionMessageAuthorization
+}
+
+// Historical decode-only contextual authorization claim. Current runtimes preserve the payload but do not establish authority from it.
+// Experimental: PermissionContextualAuthorizationData is part of an experimental API and may change or be removed.
+type PermissionContextualAuthorizationData struct {
+	// Whether the contextual human span granted or denied authority.
+	// Experimental: Polarity is part of an experimental API and may change or be removed.
+	Polarity PermissionMessageAuthorizationPolarity `json:"polarity"`
+	// Deterministic identity of the contextual message grant.
+	// Experimental: RecordID is part of an experimental API and may change or be removed.
+	RecordID string `json:"recordId"`
+	// Original blocked permission request selected by deterministic event ordering, never by the extraction model.
+	// Experimental: RequestID is part of an experimental API and may change or be removed.
+	RequestID string `json:"requestId"`
+	// End byte offset of the contextual decision span within the turn.
+	// Experimental: SpanEnd is part of an experimental API and may change or be removed.
+	SpanEnd int64 `json:"spanEnd"`
+	// Start byte offset of the contextual decision span within the turn.
+	// Experimental: SpanStart is part of an experimental API and may change or be removed.
+	SpanStart int64 `json:"spanStart"`
+	// Human turn containing the contextual decision.
+	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
+	TurnIndex int64 `json:"turnIndex"`
+}
+
+func (*PermissionContextualAuthorizationData) sessionEventData() {}
+func (*PermissionContextualAuthorizationData) Type() SessionEventType {
+	return SessionEventTypePermissionContextualAuthorization
+}
+
+// Historical decode-only contextual-assent marker. Current runtimes do not project it into the conversation or permission flow.
+// Experimental: PermissionAssentDetectedData is part of an experimental API and may change or be removed.
+type PermissionAssentDetectedData struct {
+	// Permission request the likely assent may refer to. The runtime derives this from the preceding durable blocker; the human message and extraction model do not choose it.
+	// Experimental: RequestID is part of an experimental API and may change or be removed.
+	RequestID string `json:"requestId"`
+	// Human turn whose text triggered the deterministic assent recognizer.
+	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
+	TurnIndex int64 `json:"turnIndex"`
+}
+
+func (*PermissionAssentDetectedData) sessionEventData() {}
+func (*PermissionAssentDetectedData) Type() SessionEventType {
+	return SessionEventTypePermissionAssentDetected
+}
+
+// Historical decode-only degradation marker from the retired extractor. Current runtimes ignore it for permission decisions.
+// Experimental: PermissionMessageAuthorizationDegradedData is part of an experimental API and may change or be removed.
+type PermissionMessageAuthorizationDegradedData struct {
+	// The human turn that could not be represented safely.
+	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
+	TurnIndex int64 `json:"turnIndex"`
+}
+
+func (*PermissionMessageAuthorizationDegradedData) sessionEventData() {}
+func (*PermissionMessageAuthorizationDegradedData) Type() SessionEventType {
+	return SessionEventTypePermissionMessageAuthorizationDegraded
+}
+
+// Historical decode-only extractor progress marker. Current runtimes do not run or resume extraction from it.
+// Experimental: PermissionMessageAuthorizationReadData is part of an experimental API and may change or be removed.
+type PermissionMessageAuthorizationReadData struct {
+	// Whether this read activates ongoing message-backed extraction. False for a contextual-assent-only pass while auto-approval is off, so unrelated future messages remain outside extraction.
+	// Experimental: ActivatesExtraction is part of an experimental API and may change or be removed.
+	ActivatesExtraction *bool `json:"activatesExtraction,omitempty"`
+	// The human turn that was read by the proposer.
+	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
+	TurnIndex int64 `json:"turnIndex"`
+}
+
+func (*PermissionMessageAuthorizationReadData) sessionEventData() {}
+func (*PermissionMessageAuthorizationReadData) Type() SessionEventType {
+	return SessionEventTypePermissionMessageAuthorizationRead
+}
+
+// Historical decode-only receipt from the retired Assisted Permissions authorization extractor. Current runtimes ignore it for permission decisions.
+// Experimental: PermissionCarriedForwardData is part of an experimental API and may change or be removed.
+type PermissionCarriedForwardData struct {
+	// Always `authorization_carry_forward`. Stated explicitly so a consumer reading this event cannot mistake it for a human, host-policy, or assisted-approval decision.
+	// Experimental: DecisionSource is part of an experimental API and may change or be removed.
+	DecisionSource PermissionDecisionSource `json:"decisionSource"`
+	// Identity of the prior authorization record that contained the proposal.
+	// Experimental: RecordID is part of an experimental API and may change or be removed.
+	RecordID string `json:"recordId"`
+	// Authorization edge minted for this admission. Not a prompt id: no prompt was raised, so no client should expect a request with this id.
+	// Experimental: RequestID is part of an experimental API and may change or be removed.
+	RequestID string `json:"requestId"`
+	// Tool call this admission authorizes. Its execution receipts the prior grant, which is how a single-effect approval is spent rather than carried forward again.
+	// Experimental: ToolCallID is part of an experimental API and may change or be removed.
+	ToolCallID string `json:"toolCallId"`
+}
+
+func (*PermissionCarriedForwardData) sessionEventData() {}
+func (*PermissionCarriedForwardData) Type() SessionEventType {
+	return SessionEventTypePermissionCarriedForward
 }
 
 // Hook invocation completion details including output, success status, and error information
@@ -1559,6 +1654,19 @@ type SkillInvokedRefData struct {
 
 func (*SkillInvokedRefData) sessionEventData()      {}
 func (*SkillInvokedRefData) Type() SessionEventType { return SessionEventTypeSkillInvokedRef }
+
+// Internal telemetry result for one logical model operation after all orchestrator-owned retries settle
+type ModelCallFinalResultData struct {
+	// Whether the final attempt used a bring-your-own-key provider
+	IsByok *bool `json:"isByok,omitempty"`
+	// Model identifier used by the final attempt
+	Model string `json:"model"`
+	// Bounded result of the final attempt
+	Result ModelCallFinalResult `json:"result"`
+}
+
+func (*ModelCallFinalResultData) sessionEventData()      {}
+func (*ModelCallFinalResultData) Type() SessionEventType { return SessionEventTypeModelCallFinalResult }
 
 // LLM API call usage metrics including tokens, costs, quotas, and billing information
 type AssistantUsageData struct {
@@ -1795,6 +1903,8 @@ type ModelCallStartData struct {
 	Fusion *FusionAttribution `json:"fusion,omitempty"`
 	// Model identifier used for this API call, when known
 	Model *string `json:"model,omitempty"`
+	// Parent task tool call ID when this model call belongs to a sub-agent
+	ParentToolCallID *string `json:"parentToolCallId,omitempty"`
 	// Previous response or interaction identifier included in the model request, when present
 	// Internal: PreviousResponseID is part of the SDK's internal API surface and is not intended for external use.
 	PreviousResponseID *string `json:"previousResponseId,omitempty"`
@@ -2082,8 +2192,12 @@ func (*SessionMCPServerRemovedData) Type() SessionEventType {
 
 // Payload of `session.mcp_server_status_changed` for one MCP server's status and optional failure error.
 type SessionMCPServerStatusChangedData struct {
+	// Runtime configuration provenance for a connected or failed server, or unknown when unavailable. Additional string values may be introduced.
+	ConfigSource *string `json:"configSource,omitempty"`
 	// Error message if the server entered a failed state
 	Error *string `json:"error,omitempty"`
+	// Runtime-produced classification for the final failed connection; unclassified means no classification was supplied. Additional string values may be introduced.
+	ErrorClassification *string `json:"errorClassification,omitempty"`
 	// Name of the MCP server whose status changed
 	ServerName string `json:"serverName"`
 	// Connection status: connected, failed, needs-auth, pending, disabled, stopped, or not_configured
@@ -2144,7 +2258,7 @@ type UserMessageData struct {
 	NativeDocumentPathFallbackPaths []string `json:"nativeDocumentPathFallbackPaths,omitzero"`
 	// Parent agent task ID for background telemetry correlated to this user turn
 	ParentAgentTaskID *string `json:"parentAgentTaskId,omitempty"`
-	// Responses reasoning settings anchored before this model-facing message, for cache-stable history replay
+	// Provider reasoning settings anchored before this model-facing message for cache-stable replay; the historical responsesReasoning name is retained for compatibility
 	ResponsesReasoning *ResponsesReasoning `json:"responsesReasoning,omitempty"`
 	// Origin of this message, used for timeline filtering and attribution (e.g., `skill-pdf` for hidden skill injection or `agent-<agent-id>` for an inter-agent prompt)
 	Source *string `json:"source,omitempty"`
@@ -2301,28 +2415,6 @@ type CommandQueuedData struct {
 func (*CommandQueuedData) sessionEventData()      {}
 func (*CommandQueuedData) Type() SessionEventType { return SessionEventTypeCommandQueued }
 
-// Records that a live authorization record from an earlier human decision in this session contained a permission proposal, so it ran without another prompt. This mints no authority: it accounts for one more effect against the prior grant, which is what lets a replayed session agree with the live one about how much of that grant is left.
-// Experimental: PermissionCarriedForwardData is part of an experimental API and may change or be removed.
-type PermissionCarriedForwardData struct {
-	// Always `authorization_carry_forward`. Stated explicitly so a consumer reading this event cannot mistake it for a human, host-policy, or assisted-approval decision.
-	// Experimental: DecisionSource is part of an experimental API and may change or be removed.
-	DecisionSource PermissionDecisionSource `json:"decisionSource"`
-	// Identity of the prior authorization record that contained the proposal.
-	// Experimental: RecordID is part of an experimental API and may change or be removed.
-	RecordID string `json:"recordId"`
-	// Authorization edge minted for this admission. Not a prompt id: no prompt was raised, so no client should expect a request with this id.
-	// Experimental: RequestID is part of an experimental API and may change or be removed.
-	RequestID string `json:"requestId"`
-	// Tool call this admission authorizes. Its execution receipts the prior grant, which is how a single-effect approval is spent rather than carried forward again.
-	// Experimental: ToolCallID is part of an experimental API and may change or be removed.
-	ToolCallID string `json:"toolCallId"`
-}
-
-func (*PermissionCarriedForwardData) sessionEventData() {}
-func (*PermissionCarriedForwardData) Type() SessionEventType {
-	return SessionEventTypePermissionCarriedForward
-}
-
 // Records that a mode transition notice reached the model so cache-stable mode tools can remain offered across resume.
 type SessionModeNoticeDeliveredData struct {
 	// Model-visible transition notice persisted for a mid-turn delivery
@@ -2334,51 +2426,6 @@ type SessionModeNoticeDeliveredData struct {
 func (*SessionModeNoticeDeliveredData) sessionEventData() {}
 func (*SessionModeNoticeDeliveredData) Type() SessionEventType {
 	return SessionEventTypeSessionModeNoticeDelivered
-}
-
-// Records that deterministic text recognition found likely assent in the human turn immediately following a root Autopilot permission request that was blocked because no interactive response was available. This event grants no authority; its model-facing projection only suggests retrying the unchanged operation.
-// Experimental: PermissionAssentDetectedData is part of an experimental API and may change or be removed.
-type PermissionAssentDetectedData struct {
-	// Permission request the likely assent may refer to. The runtime derives this from the preceding durable blocker; the human message and extraction model do not choose it.
-	// Experimental: RequestID is part of an experimental API and may change or be removed.
-	RequestID string `json:"requestId"`
-	// Human turn whose text triggered the deterministic assent recognizer.
-	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
-	TurnIndex int64 `json:"turnIndex"`
-}
-
-func (*PermissionAssentDetectedData) sessionEventData() {}
-func (*PermissionAssentDetectedData) Type() SessionEventType {
-	return SessionEventTypePermissionAssentDetected
-}
-
-// Records that message-backed authorization could not safely represent one human turn before compaction. The runtime may compact the original message after this marker is durable, but message-derived carry-forward and assisted auto-approval remain disabled for the rest of the session so subsequent commands continue through the ordinary permission prompt.
-// Experimental: PermissionMessageAuthorizationDegradedData is part of an experimental API and may change or be removed.
-type PermissionMessageAuthorizationDegradedData struct {
-	// The human turn that could not be represented safely.
-	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
-	TurnIndex int64 `json:"turnIndex"`
-}
-
-func (*PermissionMessageAuthorizationDegradedData) sessionEventData() {}
-func (*PermissionMessageAuthorizationDegradedData) Type() SessionEventType {
-	return SessionEventTypePermissionMessageAuthorizationDegraded
-}
-
-// Records that one human turn has been read by the blinded authorization proposer, whether or not it minted anything, so a resumed session does not re-run the extraction model on a turn the live session already read. Also records whether that pass activates ongoing extraction; contextual-assent-only passes do not, so unrelated future messages remain outside extraction.
-// Experimental: PermissionMessageAuthorizationReadData is part of an experimental API and may change or be removed.
-type PermissionMessageAuthorizationReadData struct {
-	// Whether this read activates ongoing message-backed extraction. False for a contextual-assent-only pass while auto-approval is off, so unrelated future messages remain outside extraction.
-	// Experimental: ActivatesExtraction is part of an experimental API and may change or be removed.
-	ActivatesExtraction *bool `json:"activatesExtraction,omitempty"`
-	// The human turn that was read by the proposer.
-	// Experimental: TurnIndex is part of an experimental API and may change or be removed.
-	TurnIndex int64 `json:"turnIndex"`
-}
-
-func (*PermissionMessageAuthorizationReadData) sessionEventData() {}
-func (*PermissionMessageAuthorizationReadData) Type() SessionEventType {
-	return SessionEventTypePermissionMessageAuthorizationRead
 }
 
 // Registered command dispatch request routed to the owning client
@@ -2664,9 +2711,11 @@ func (*SessionResumeData) Type() SessionEventType { return SessionEventTypeSessi
 
 // Session rewind details including target event and count of removed events
 type SessionSnapshotRewindData struct {
+	// The removed events, starting with `upToEventId`. Later events not listed were kept, such as a background agent's events that interleaved with a withdrawn turn
+	EventIDs []string `json:"eventIds,omitzero"`
 	// Number of events that were removed by the rewind
 	EventsRemoved int64 `json:"eventsRemoved"`
-	// Event ID that was rewound to; this event and all after it were removed
+	// First removed event. Without `eventIds`, it and every event after it were removed
 	UpToEventID string `json:"upToEventId"`
 }
 
@@ -2932,7 +2981,7 @@ type SubagentStartedData struct {
 	AgentType *string `json:"agentType,omitempty"`
 	// Whether the sub-agent runs synchronously or in the background.
 	ExecutionMode *string `json:"executionMode,omitempty"`
-	// Root id of the factory run that spawned this sub-agent, when it was spawned by one.
+	// Legacy root id of the workflow run that spawned this sub-agent. New consumers should use workflowRunId.
 	FactoryRunID *string `json:"factoryRunId,omitempty"`
 	// Model the sub-agent will run with, when known at start.
 	Model *string `json:"model,omitempty"`
@@ -2942,10 +2991,12 @@ type SubagentStartedData struct {
 	ParentID *string `json:"parentId,omitempty"`
 	// Whether this sub-agent can be resumed. Currently always false.
 	Resumable *bool `json:"resumable,omitempty"`
-	// Where the model input for this sub-agent came from. Present when the task planner resolved the launch (the task tool and factory agents); absent for sub-agents created through other runtime paths.
+	// Where the model input for this sub-agent came from. Present when the task planner resolved the launch (the task tool and workflow agents); absent for sub-agents created through other runtime paths.
 	TaskModelSource *SubagentTaskModelSource `json:"taskModelSource,omitempty"`
 	// Tool call ID of the parent tool invocation that spawned this sub-agent
 	ToolCallID string `json:"toolCallId"`
+	// Root id of the workflow run that spawned this sub-agent, when it was spawned by one.
+	WorkflowRunID *string `json:"workflowRunId,omitempty"`
 }
 
 func (*SubagentStartedData) sessionEventData()      {}
@@ -2957,7 +3008,7 @@ type SystemNotificationData struct {
 	Content string `json:"content"`
 	// Structured metadata identifying what triggered this notification
 	Kind SystemNotification `json:"kind"`
-	// Responses reasoning settings anchored before this model-facing message, for cache-stable history replay
+	// Provider reasoning settings anchored before this model-facing message for cache-stable replay; the historical responsesReasoning name is retained for compatibility
 	ResponsesReasoning *ResponsesReasoning `json:"responsesReasoning,omitempty"`
 }
 
@@ -2968,6 +3019,8 @@ func (*SystemNotificationData) Type() SessionEventType { return SessionEventType
 type SystemMessageData struct {
 	// The system or developer prompt text sent as model input
 	Content string `json:"content"`
+	// Optional ordered structured blocks corresponding to content, retained for prompt-cache layout restoration.
+	ContentBlocks []SystemMessageContentBlock `json:"contentBlocks,omitzero"`
 	// Logical interaction identifier for the model run receiving this prompt
 	InteractionID *string `json:"interactionId,omitempty"`
 	// Metadata about the prompt template and its construction
@@ -2999,6 +3052,19 @@ type SessionTaskCompleteData struct {
 
 func (*SessionTaskCompleteData) sessionEventData()      {}
 func (*SessionTaskCompleteData) Type() SessionEventType { return SessionEventTypeSessionTaskComplete }
+
+// The model the user had explicitly selected is no longer available, because the host that published it withdrew it, so the session no longer has an explicit selection. The next turn resolves a default as though the user had never chosen a model. Clients should stop presenting the previous model as selected. This event is durable because resume rebuilds the selected model from the event log; without it a resumed session would restore a model its provider no longer serves. Reasoning effort, verbosity, and other session-level preferences are deliberately unchanged, because they belong to the session rather than to the model.
+type SessionModelDeselectedData struct {
+	// Model that was selected before the host withdrew it.
+	PreviousModel string `json:"previousModel"`
+	// Low-cardinality reason the selection was cleared.
+	Reason ModelDeselectedReason `json:"reason"`
+}
+
+func (*SessionModelDeselectedData) sessionEventData() {}
+func (*SessionModelDeselectedData) Type() SessionEventType {
+	return SessionEventTypeSessionModelDeselected
+}
 
 // Tool execution completion results including success status, detailed output, and error information
 type ToolExecutionCompleteData struct {
@@ -3092,6 +3158,8 @@ type ToolExecutionStartData struct {
 	ToolDescription *ToolExecutionStartToolDescription `json:"toolDescription,omitempty"`
 	// Name of the tool being executed
 	ToolName string `json:"toolName"`
+	// Human-readable display title for the tool, when the selected tool descriptor has a non-empty title.
+	ToolTitle *string `json:"toolTitle,omitempty"`
 	// Identifier for the agent loop turn this tool was invoked in, matching the corresponding assistant.turn_start event
 	TurnID *string `json:"turnId,omitempty"`
 }
@@ -3137,6 +3205,8 @@ func (*AbortData) Type() SessionEventType { return SessionEventTypeAbort }
 type AssistantTurnEndData struct {
 	// Model identifier used for this turn, when known
 	Model *string `json:"model,omitempty"`
+	// Parent task tool call ID when this turn belongs to a sub-agent
+	ParentToolCallID *string `json:"parentToolCallId,omitempty"`
 	// Identifier of the turn that has ended, matching the corresponding assistant.turn_start event
 	TurnID string `json:"turnId"`
 }
@@ -3150,6 +3220,8 @@ type AssistantTurnStartData struct {
 	InteractionID *string `json:"interactionId,omitempty"`
 	// Model identifier used for this turn, when known
 	Model *string `json:"model,omitempty"`
+	// Parent task tool call ID when this turn belongs to a sub-agent
+	ParentToolCallID *string `json:"parentToolCallId,omitempty"`
 	// Identifier for this turn within the agentic loop, typically a stringified turn number
 	TurnID string `json:"turnId"`
 }
@@ -3655,14 +3727,6 @@ type ExtensionsLoadedExtension struct {
 	Status ExtensionsLoadedExtensionStatus `json:"status"`
 }
 
-// A declared phase shown in a factory permission prompt.
-type FactoryPermissionPhase struct {
-	// Optional phase detail
-	Detail *string `json:"detail,omitempty"`
-	// Phase title
-	Title string `json:"title"`
-}
-
 // Experimental attribution linking an ordinary event to the HydraFusion turn, phase, and concrete source that produced it.
 // Experimental: FusionAttribution is part of an experimental API and may change or be removed.
 type FusionAttribution struct {
@@ -3672,6 +3736,8 @@ type FusionAttribution struct {
 	ConversationScope *string `json:"conversationScope,omitempty"`
 	// Stable identifier for the HydraFusion turn that produced the event.
 	FusionID string `json:"fusionId"`
+	// Whether this model request consumed a user steering message rather than only internal Fusion work.
+	HasUserSteering *bool `json:"hasUserSteering,omitempty"`
 	// HydraFusion orchestration pattern selected for the turn.
 	Pattern string `json:"pattern"`
 	// Identifier of the concrete phase that produced the event.
@@ -3688,6 +3754,19 @@ type FusionAttribution struct {
 	SourcePhaseID *string `json:"sourcePhaseId,omitempty"`
 	// Synthetic HydraFusion model selected for the session.
 	SyntheticModel string `json:"syntheticModel"`
+}
+
+// Experimental: FusionCritic is part of an experimental API and may change or be removed.
+type FusionCritic struct {
+	// Concrete model selected for this critic.
+	// Experimental: Model is part of an experimental API and may change or be removed.
+	Model string `json:"model"`
+	// Unique execution phase identifier for this critic.
+	// Experimental: PhaseID is part of an experimental API and may change or be removed.
+	PhaseID string `json:"phaseId"`
+	// Explicit reasoning effort selected for this critic, if supplied.
+	// Experimental: ReasoningEffort is part of an experimental API and may change or be removed.
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 }
 
 // Durable server recommendation for subsequent HydraFusion turns.
@@ -3833,6 +3912,8 @@ type MCPOauthRequiredStaticClientConfig struct {
 	GrantType *MCPOauthRequiredStaticClientConfigGrantType `json:"grantType,omitempty"`
 	// Whether this is a public OAuth client
 	PublicClient *bool `json:"publicClient,omitempty"`
+	// Configured OAuth scope string used when the server challenge omits scope or provides an empty scope
+	Scope *string `json:"scope,omitempty"`
 }
 
 // OAuth WWW-Authenticate parameters parsed from an MCP auth challenge
@@ -3949,6 +4030,9 @@ type PermissionPromptRequestCommands struct {
 	RequestSandboxBypassReason *string `json:"requestSandboxBypassReason,omitempty"`
 	// True when the escalation is a permissive retry that keeps the sandbox and network policy attached while recording file and process accesses instead of blocking them.
 	RequestSandboxPermissive *bool `json:"requestSandboxPermissive,omitempty"`
+	// Sandbox policy edit that would let the command run inside the sandbox. Only present when requestSandboxBypass is true.
+	// Experimental: SandboxPathGrant is part of an experimental API and may change or be removed.
+	SandboxPathGrant *PermissionSandboxPathGrant `json:"sandboxPathGrant,omitempty"`
 	// Tool call ID that triggered this permission request
 	ToolCallID *string `json:"toolCallId,omitempty"`
 	// Optional warning message about risks of running this command
@@ -4034,50 +4118,6 @@ func (PermissionPromptRequestExtensionPermissionAccess) Kind() PermissionPromptR
 	return PermissionPromptRequestKindExtensionPermissionAccess
 }
 
-// Factory run or authoring permission prompt
-type PermissionPromptRequestFactory struct {
-	// Canonical key used for scoped factory approvals
-	ApprovalKey string `json:"approvalKey"`
-	// Assisted-approval judge information for this request; present only in assisted mode.
-	// Experimental: AssistedApproval is part of an experimental API and may change or be removed.
-	AssistedApproval *PermissionAssistedApproval `json:"assistedApproval,omitempty"`
-	// Whether this factory is eligible for persistent approval
-	CanPersistApproval bool `json:"canPersistApproval"`
-	// Factory-declared AI-credit limit before any run/resume caller override is applied.
-	DeclaredMaxAiCredits *float64 `json:"declaredMaxAiCredits,omitempty"`
-	// Factory-declared concurrent-subagent limit before any run/resume caller override is applied.
-	DeclaredMaxConcurrentSubagents *int64 `json:"declaredMaxConcurrentSubagents,omitempty"`
-	// Factory-declared total-subagent limit before any run/resume caller override is applied.
-	DeclaredMaxTotalSubagents *int64 `json:"declaredMaxTotalSubagents,omitempty"`
-	// Factory-declared active-time limit in seconds before any run/resume caller override is applied.
-	DeclaredTimeoutSeconds *float64 `json:"declaredTimeoutSeconds,omitempty"`
-	// Factory description
-	Description string `json:"description"`
-	// Whether managed policy requires a human response and forbids host auto-approval
-	ManagedApprovalRequired *bool `json:"managedApprovalRequired,omitempty"`
-	// Effective AI-credit limit; omitted means unlimited
-	MaxAiCredits *float64 `json:"maxAiCredits,omitempty"`
-	// Effective concurrent-subagent limit; omitted means unlimited
-	MaxConcurrentSubagents *int64 `json:"maxConcurrentSubagents,omitempty"`
-	// Effective total-subagent limit; omitted means unlimited
-	MaxTotalSubagents *int64 `json:"maxTotalSubagents,omitempty"`
-	// Factory name
-	Name string `json:"name"`
-	// Factory operation, either run or author
-	Operation FactoryPermissionOperation `json:"operation"`
-	// Declared factory phases
-	Phases []FactoryPermissionPhase `json:"phases"`
-	// Effective active-time limit in seconds; omitted means unlimited
-	TimeoutSeconds *float64 `json:"timeoutSeconds,omitempty"`
-	// Tool call ID that triggered this permission request
-	ToolCallID *string `json:"toolCallId,omitempty"`
-}
-
-func (PermissionPromptRequestFactory) permissionPromptRequest() {}
-func (PermissionPromptRequestFactory) Kind() PermissionPromptRequestKind {
-	return PermissionPromptRequestKindFactory
-}
-
 // Hook confirmation permission prompt
 type PermissionPromptRequestHook struct {
 	// Assisted-approval judge information for this request; present only in assisted mode.
@@ -4160,6 +4200,9 @@ type PermissionPromptRequestPath struct {
 	AssistedApproval *PermissionAssistedApproval `json:"assistedApproval,omitempty"`
 	// File paths that require explicit approval
 	Paths []string `json:"paths"`
+	// Canonical directory candidates that can be granted for file-tool read access in this logical session. Present only for read path prompts.
+	// Experimental: ReadOnlyDirectories is part of an experimental API and may change or be removed.
+	ReadOnlyDirectories []string `json:"readOnlyDirectories,omitzero"`
 	// Tool call ID that triggered this permission request
 	ToolCallID *string `json:"toolCallId,omitempty"`
 }
@@ -4216,6 +4259,50 @@ type PermissionPromptRequestURL struct {
 func (PermissionPromptRequestURL) permissionPromptRequest() {}
 func (PermissionPromptRequestURL) Kind() PermissionPromptRequestKind {
 	return PermissionPromptRequestKindURL
+}
+
+// Workflow run or authoring permission prompt
+type PermissionPromptRequestWorkflow struct {
+	// Canonical key used for scoped workflow approvals
+	ApprovalKey string `json:"approvalKey"`
+	// Assisted-approval judge information for this request; present only in assisted mode.
+	// Experimental: AssistedApproval is part of an experimental API and may change or be removed.
+	AssistedApproval *PermissionAssistedApproval `json:"assistedApproval,omitempty"`
+	// Whether this workflow is eligible for persistent approval
+	CanPersistApproval bool `json:"canPersistApproval"`
+	// Workflow-declared AI-credit limit before any run/resume caller override is applied.
+	DeclaredMaxAiCredits *float64 `json:"declaredMaxAiCredits,omitempty"`
+	// Workflow-declared concurrent-subagent limit before any run/resume caller override is applied.
+	DeclaredMaxConcurrentSubagents *int64 `json:"declaredMaxConcurrentSubagents,omitempty"`
+	// Workflow-declared total-subagent limit before any run/resume caller override is applied.
+	DeclaredMaxTotalSubagents *int64 `json:"declaredMaxTotalSubagents,omitempty"`
+	// Workflow-declared active-time limit in seconds before any run/resume caller override is applied.
+	DeclaredTimeoutSeconds *float64 `json:"declaredTimeoutSeconds,omitempty"`
+	// Workflow description
+	Description string `json:"description"`
+	// Whether managed policy requires a human response and forbids host auto-approval
+	ManagedApprovalRequired *bool `json:"managedApprovalRequired,omitempty"`
+	// Effective AI-credit limit; omitted means unlimited
+	MaxAiCredits *float64 `json:"maxAiCredits,omitempty"`
+	// Effective concurrent-subagent limit; omitted means unlimited
+	MaxConcurrentSubagents *int64 `json:"maxConcurrentSubagents,omitempty"`
+	// Effective total-subagent limit; omitted means unlimited
+	MaxTotalSubagents *int64 `json:"maxTotalSubagents,omitempty"`
+	// Workflow name
+	Name string `json:"name"`
+	// Workflow operation, either run or author
+	Operation WorkflowPermissionOperation `json:"operation"`
+	// Declared workflow phases
+	Phases []WorkflowPermissionPhase `json:"phases"`
+	// Effective active-time limit in seconds; omitted means unlimited
+	TimeoutSeconds *float64 `json:"timeoutSeconds,omitempty"`
+	// Tool call ID that triggered this permission request
+	ToolCallID *string `json:"toolCallId,omitempty"`
+}
+
+func (PermissionPromptRequestWorkflow) permissionPromptRequest() {}
+func (PermissionPromptRequestWorkflow) Kind() PermissionPromptRequestKind {
+	return PermissionPromptRequestKindWorkflow
 }
 
 // File write permission prompt
@@ -4336,47 +4423,6 @@ func (PermissionRequestExtensionPermissionAccess) Kind() PermissionRequestKind {
 	return PermissionRequestKindExtensionPermissionAccess
 }
 
-// Factory run or authoring permission request
-type PermissionRequestFactory struct {
-	// Canonical key used for scoped factory approvals
-	ApprovalKey string `json:"approvalKey"`
-	// Whether this factory is eligible for persistent approval
-	CanPersistApproval bool `json:"canPersistApproval"`
-	// Factory-declared AI-credit limit before any run/resume caller override is applied.
-	DeclaredMaxAiCredits *float64 `json:"declaredMaxAiCredits,omitempty"`
-	// Factory-declared concurrent-subagent limit before any run/resume caller override is applied.
-	DeclaredMaxConcurrentSubagents *int64 `json:"declaredMaxConcurrentSubagents,omitempty"`
-	// Factory-declared total-subagent limit before any run/resume caller override is applied.
-	DeclaredMaxTotalSubagents *int64 `json:"declaredMaxTotalSubagents,omitempty"`
-	// Factory-declared active-time limit in seconds before any run/resume caller override is applied.
-	DeclaredTimeoutSeconds *float64 `json:"declaredTimeoutSeconds,omitempty"`
-	// Factory description
-	Description string `json:"description"`
-	// When true, managed policy requires an explicit user decision and automatic approval must be bypassed.
-	ManagedApprovalRequired *bool `json:"managedApprovalRequired,omitempty"`
-	// Effective AI-credit limit; omitted means unlimited
-	MaxAiCredits *float64 `json:"maxAiCredits,omitempty"`
-	// Effective concurrent-subagent limit; omitted means unlimited
-	MaxConcurrentSubagents *int64 `json:"maxConcurrentSubagents,omitempty"`
-	// Effective total-subagent limit; omitted means unlimited
-	MaxTotalSubagents *int64 `json:"maxTotalSubagents,omitempty"`
-	// Factory name
-	Name string `json:"name"`
-	// Factory operation, either run or author
-	Operation FactoryPermissionOperation `json:"operation"`
-	// Declared factory phases
-	Phases []FactoryPermissionPhase `json:"phases"`
-	// Effective active-time limit in seconds; omitted means unlimited
-	TimeoutSeconds *float64 `json:"timeoutSeconds,omitempty"`
-	// Tool call ID that triggered this permission request
-	ToolCallID *string `json:"toolCallId,omitempty"`
-}
-
-func (PermissionRequestFactory) permissionRequest() {}
-func (PermissionRequestFactory) Kind() PermissionRequestKind {
-	return PermissionRequestKindFactory
-}
-
 // Hook confirmation permission request
 type PermissionRequestHook struct {
 	// Optional message from the hook explaining why confirmation is needed
@@ -4469,6 +4515,9 @@ type PermissionRequestRead struct {
 	// Runtime-resolved canonical path used for authorization identity checks. Internal and experimental; clients should continue to display path.
 	// Experimental: ResolvedPath is part of an experimental API and may change or be removed.
 	ResolvedPath *string `json:"resolvedPath,omitempty"`
+	// Sandbox policy edit that would let the read run inside the sandbox. Only present when requestSandboxBypass is true.
+	// Experimental: SandboxPathGrant is part of an experimental API and may change or be removed.
+	SandboxPathGrant *PermissionSandboxPathGrant `json:"sandboxPathGrant,omitempty"`
 	// Tool call ID that triggered this permission request
 	ToolCallID *string `json:"toolCallId,omitempty"`
 }
@@ -4510,6 +4559,9 @@ type PermissionRequestShell struct {
 	// Runtime-resolved canonical working directory the command runs in, used for authorization identity checks. Internal and experimental; clients should not display it.
 	// Experimental: ResolvedWorkingDirectory is part of an experimental API and may change or be removed.
 	ResolvedWorkingDirectory *string `json:"resolvedWorkingDirectory,omitempty"`
+	// Sandbox policy edit that would let the command run inside the sandbox. Only present when requestSandboxBypass is true.
+	// Experimental: SandboxPathGrant is part of an experimental API and may change or be removed.
+	SandboxPathGrant *PermissionSandboxPathGrant `json:"sandboxPathGrant,omitempty"`
 	// Tool call ID that triggered this permission request
 	ToolCallID *string `json:"toolCallId,omitempty"`
 	// Optional warning message about risks of running this command
@@ -4544,6 +4596,47 @@ func (PermissionRequestURL) Kind() PermissionRequestKind {
 	return PermissionRequestKindURL
 }
 
+// Workflow run or authoring permission request
+type PermissionRequestWorkflow struct {
+	// Canonical key used for scoped workflow approvals
+	ApprovalKey string `json:"approvalKey"`
+	// Whether this workflow is eligible for persistent approval
+	CanPersistApproval bool `json:"canPersistApproval"`
+	// Workflow-declared AI-credit limit before any run/resume caller override is applied.
+	DeclaredMaxAiCredits *float64 `json:"declaredMaxAiCredits,omitempty"`
+	// Workflow-declared concurrent-subagent limit before any run/resume caller override is applied.
+	DeclaredMaxConcurrentSubagents *int64 `json:"declaredMaxConcurrentSubagents,omitempty"`
+	// Workflow-declared total-subagent limit before any run/resume caller override is applied.
+	DeclaredMaxTotalSubagents *int64 `json:"declaredMaxTotalSubagents,omitempty"`
+	// Workflow-declared active-time limit in seconds before any run/resume caller override is applied.
+	DeclaredTimeoutSeconds *float64 `json:"declaredTimeoutSeconds,omitempty"`
+	// Workflow description
+	Description string `json:"description"`
+	// Whether managed policy requires a human response and forbids host auto-approval
+	ManagedApprovalRequired *bool `json:"managedApprovalRequired,omitempty"`
+	// Effective AI-credit limit; omitted means unlimited
+	MaxAiCredits *float64 `json:"maxAiCredits,omitempty"`
+	// Effective concurrent-subagent limit; omitted means unlimited
+	MaxConcurrentSubagents *int64 `json:"maxConcurrentSubagents,omitempty"`
+	// Effective total-subagent limit; omitted means unlimited
+	MaxTotalSubagents *int64 `json:"maxTotalSubagents,omitempty"`
+	// Workflow name
+	Name string `json:"name"`
+	// Workflow operation, either run or author
+	Operation WorkflowPermissionOperation `json:"operation"`
+	// Declared workflow phases
+	Phases []WorkflowPermissionPhase `json:"phases"`
+	// Effective active-time limit in seconds; omitted means unlimited
+	TimeoutSeconds *float64 `json:"timeoutSeconds,omitempty"`
+	// Tool call ID that triggered this permission request
+	ToolCallID *string `json:"toolCallId,omitempty"`
+}
+
+func (PermissionRequestWorkflow) permissionRequest() {}
+func (PermissionRequestWorkflow) Kind() PermissionRequestKind {
+	return PermissionRequestKindWorkflow
+}
+
 // File write permission request
 type PermissionRequestWrite struct {
 	// Whether the UI can offer session-wide approval for file write operations
@@ -4565,6 +4658,9 @@ type PermissionRequestWrite struct {
 	// Runtime-resolved canonical path used for authorization identity checks. Internal and experimental; clients should continue to display fileName.
 	// Experimental: ResolvedPath is part of an experimental API and may change or be removed.
 	ResolvedPath *string `json:"resolvedPath,omitempty"`
+	// Sandbox policy edit that would let the write run inside the sandbox. Only present when requestSandboxBypass is true.
+	// Experimental: SandboxPathGrant is part of an experimental API and may change or be removed.
+	SandboxPathGrant *PermissionSandboxPathGrant `json:"sandboxPathGrant,omitempty"`
 	// Tool call ID that triggered this permission request
 	ToolCallID *string `json:"toolCallId,omitempty"`
 }
@@ -4651,6 +4747,17 @@ func (PermissionApprovedForSession) Kind() PermissionResultKind {
 	return PermissionResultKindApprovedForSession
 }
 
+// Permission response variant that approves a request and records file-tool read authority for specific directories in this logical session.
+type PermissionApprovedReadOnlyForSession struct {
+	// Canonical directories covered by the session read-only grant
+	Directories []string `json:"directories"`
+}
+
+func (PermissionApprovedReadOnlyForSession) permissionResult() {}
+func (PermissionApprovedReadOnlyForSession) Kind() PermissionResultKind {
+	return PermissionResultKindApprovedReadOnlyForSession
+}
+
 // Permission response variant indicating the request was cancelled before use, with an optional reason.
 type PermissionCancelled struct {
 	// Optional explanation of why the request was cancelled
@@ -4719,6 +4826,19 @@ type PermissionDeniedNoApprovalRuleAndCouldNotRequestFromUser struct {
 func (PermissionDeniedNoApprovalRuleAndCouldNotRequestFromUser) permissionResult() {}
 func (PermissionDeniedNoApprovalRuleAndCouldNotRequestFromUser) Kind() PermissionResultKind {
 	return PermissionResultKindDeniedNoApprovalRuleAndCouldNotRequestFromUser
+}
+
+// A sandbox filesystem policy edit that would let a blocked operation run inside the sandbox instead of outside it. Offered only on a sandbox escalation request whose denial adding this path lifts, and only when managed policy permits the grant. A host accepts it with session.sandbox.grantPathForRequest, which adds the path to the session's sandbox policy and re-runs the operation sandboxed; a host that persists sandbox settings may also save the path there.
+// Experimental: PermissionSandboxPathGrant is part of an experimental API and may change or be removed.
+type PermissionSandboxPathGrant struct {
+	// Which access the grant confers, and so which policy list the path is added to
+	Access PermissionSandboxPathGrantAccess `json:"access"`
+	// The path the sandbox refused, present only when it differs from path. That happens when a write under a read-only folder moves the folder to the read-write paths, when a path that does not exist yet is granted through its nearest existing folder, because the OS sandbox cannot grant a path before it exists, and when either is spelled through a symlink, because a grant covers its path as written, so path is then the resolved location. Hosts should then name path in the offer, since the denial names this one.
+	DeniedPath *string `json:"deniedPath,omitempty"`
+	// Absolute path to add to the sandbox filesystem policy
+	Path string `json:"path"`
+	// readonlyPaths entries the grant removes, exactly as written in the policy, because a read-only entry for the same location would otherwise keep the path read-only. A host that persists the path must remove these entries from its stored readonlyPaths too.
+	RemovedReadonlyPaths []string `json:"removedReadonlyPaths,omitzero"`
 }
 
 // A model-facing binary result as persisted: full inline data, a size-omitted marker, or a deduplicated asset reference
@@ -4805,7 +4925,7 @@ func (r PersistedBinaryImage) Type() PersistedBinaryResultType {
 	return PersistedBinaryResultType(r.Discriminator)
 }
 
-// Original request-level and effective conversation reasoning effort for a Responses history boundary
+// Original request-level and effective conversation reasoning effort for a provider history boundary; the historical type name is retained for compatibility
 type ResponsesReasoning struct {
 	// Effective effort selected before this message, independent of the response-level reasoning field
 	Effort string `json:"effort"`
@@ -4918,9 +5038,19 @@ type SkillsLoadedSkill struct {
 	UserInvocable bool `json:"userInvocable"`
 }
 
+// One persisted structured system-message block and its cache intent
+type SystemMessageContentBlock struct {
+	// Explicit prompt-cache intent. True places a breakpoint after this block, false suppresses one, and absence preserves the provider's legacy default.
+	CacheBreakpoint *bool `json:"cacheBreakpoint,omitempty"`
+	// Text content for this system-message block.
+	Content string `json:"content"`
+	// Diagnostic classification indicating whether the block is stable across equivalent sessions.
+	IsStatic *bool `json:"isStatic,omitempty"`
+}
+
 // Metadata about the prompt template and its construction
 type SystemMessageMetadata struct {
-	// Version identifier of the prompt template used
+	// Version identifier of the prompt template or structured prompt layout used
 	PromptVersion *string `json:"promptVersion,omitempty"`
 	// Template variables used when constructing the prompt
 	Variables map[string]any `json:"variables,omitzero"`
@@ -4978,37 +5108,6 @@ type SystemNotificationAgentIdle struct {
 func (SystemNotificationAgentIdle) systemNotification() {}
 func (SystemNotificationAgentIdle) Type() SystemNotificationType {
 	return SystemNotificationTypeAgentIdle
-}
-
-// System notification metadata for a factory execution attempt that reached a terminal state.
-type SystemNotificationFactoryCompleted struct {
-	// Execution attempt that reached this terminal state.
-	Attempt int64 `json:"attempt"`
-	// Consumed AI usage in nano-AIU.
-	ConsumedNanoAiu int64 `json:"consumedNanoAiu"`
-	// Subagents consumed by the run across all attempts.
-	ConsumedSubagents int64 `json:"consumedSubagents"`
-	// Accumulated active execution time in milliseconds.
-	ElapsedMs int64 `json:"elapsedMs"`
-	// Persisted factory name.
-	FactoryName string `json:"factoryName"`
-	// Machine-readable terminal failure details, when present.
-	Failure any `json:"failure,omitempty"`
-	// Pause initiator metadata when this attempt settled as paused.
-	PauseInfo SystemNotificationFactoryPauseInfo `json:"pauseInfo,omitempty"`
-	// Bounded prompt-safe preview of the completed result.
-	ResultPreview *string `json:"resultPreview,omitempty"`
-	// Actionable run_factory resume guidance for a resource-limit failure.
-	RetryGuidance *string `json:"retryGuidance,omitempty"`
-	// Factory run identifier.
-	RunID string `json:"runId"`
-	// Terminal status reached by this execution attempt.
-	Status SystemNotificationFactoryCompletedStatus `json:"status"`
-}
-
-func (SystemNotificationFactoryCompleted) systemNotification() {}
-func (SystemNotificationFactoryCompleted) Type() SystemNotificationType {
-	return SystemNotificationTypeFactoryCompleted
 }
 
 // System notification metadata for an instruction file discovered during tool access, including source, trigger file, and tool.
@@ -5084,38 +5183,69 @@ func (SystemNotificationUnclassified) Type() SystemNotificationType {
 	return SystemNotificationTypeUnclassified
 }
 
-// Durable metadata describing who initiated a factory pause.
-type SystemNotificationFactoryPauseInfo interface {
-	systemNotificationFactoryPauseInfo()
-	Type() SystemNotificationFactoryPauseInfoType
+// System notification metadata for a workflow execution attempt that reached a terminal state.
+type SystemNotificationWorkflowCompleted struct {
+	// Execution attempt that reached this terminal state.
+	Attempt int64 `json:"attempt"`
+	// Consumed AI usage in nano-AIU.
+	ConsumedNanoAiu int64 `json:"consumedNanoAiu"`
+	// Subagents consumed by the run across all attempts.
+	ConsumedSubagents int64 `json:"consumedSubagents"`
+	// Accumulated active execution time in milliseconds.
+	ElapsedMs int64 `json:"elapsedMs"`
+	// Machine-readable terminal failure details, when present.
+	Failure any `json:"failure,omitempty"`
+	// Pause initiator metadata when this attempt settled as paused.
+	PauseInfo SystemNotificationWorkflowPauseInfo `json:"pauseInfo,omitempty"`
+	// Bounded prompt-safe preview of the completed result.
+	ResultPreview *string `json:"resultPreview,omitempty"`
+	// Actionable run_dynamic_workflow resume guidance for a resource-limit failure.
+	RetryGuidance *string `json:"retryGuidance,omitempty"`
+	// Workflow run identifier.
+	RunID string `json:"runId"`
+	// Terminal status reached by this execution attempt.
+	Status SystemNotificationWorkflowCompletedStatus `json:"status"`
+	// Persisted workflow name.
+	WorkflowName string `json:"workflowName"`
 }
 
-type RawSystemNotificationFactoryPauseInfo struct {
-	Discriminator SystemNotificationFactoryPauseInfoType
+func (SystemNotificationWorkflowCompleted) systemNotification() {}
+func (SystemNotificationWorkflowCompleted) Type() SystemNotificationType {
+	return SystemNotificationTypeWorkflowCompleted
+}
+
+// Durable metadata describing who initiated a workflow pause.
+type SystemNotificationWorkflowPauseInfo interface {
+	systemNotificationWorkflowPauseInfo()
+	Type() SystemNotificationWorkflowPauseInfoType
+}
+
+type RawSystemNotificationWorkflowPauseInfo struct {
+	Discriminator SystemNotificationWorkflowPauseInfoType
 	Raw           json.RawMessage
 }
 
-func (RawSystemNotificationFactoryPauseInfo) systemNotificationFactoryPauseInfo() {}
-func (r RawSystemNotificationFactoryPauseInfo) Type() SystemNotificationFactoryPauseInfoType {
+func (RawSystemNotificationWorkflowPauseInfo) systemNotificationWorkflowPauseInfo() {}
+func (r RawSystemNotificationWorkflowPauseInfo) Type() SystemNotificationWorkflowPauseInfoType {
 	return r.Discriminator
 }
 
-type SystemNotificationFactoryPauseInfoCheckpoint struct {
+type SystemNotificationWorkflowPauseInfoCheckpoint struct {
 	// Stable author-defined checkpoint key that initiated the pause.
 	Key string `json:"key"`
 }
 
-func (SystemNotificationFactoryPauseInfoCheckpoint) systemNotificationFactoryPauseInfo() {}
-func (SystemNotificationFactoryPauseInfoCheckpoint) Type() SystemNotificationFactoryPauseInfoType {
-	return SystemNotificationFactoryPauseInfoTypeCheckpoint
+func (SystemNotificationWorkflowPauseInfoCheckpoint) systemNotificationWorkflowPauseInfo() {}
+func (SystemNotificationWorkflowPauseInfoCheckpoint) Type() SystemNotificationWorkflowPauseInfoType {
+	return SystemNotificationWorkflowPauseInfoTypeCheckpoint
 }
 
-type SystemNotificationFactoryPauseInfoUser struct {
+type SystemNotificationWorkflowPauseInfoUser struct {
 }
 
-func (SystemNotificationFactoryPauseInfoUser) systemNotificationFactoryPauseInfo() {}
-func (SystemNotificationFactoryPauseInfoUser) Type() SystemNotificationFactoryPauseInfoType {
-	return SystemNotificationFactoryPauseInfoTypeUser
+func (SystemNotificationWorkflowPauseInfoUser) systemNotificationWorkflowPauseInfo() {}
+func (SystemNotificationWorkflowPauseInfoUser) Type() SystemNotificationWorkflowPauseInfoType {
+	return SystemNotificationWorkflowPauseInfoTypeUser
 }
 
 // A content block within a tool result, which may be text, terminal output, image, audio, or a resource
@@ -5440,6 +5570,14 @@ type UsageCheckpointModelCacheState struct {
 	CacheTtlSeconds int64 `json:"cacheTtlSeconds"`
 	// Model identifier associated with this cache state
 	ModelID string `json:"modelId"`
+}
+
+// A declared phase shown in a workflow permission prompt.
+type WorkflowPermissionPhase struct {
+	// Optional phase detail
+	Detail *string `json:"detail,omitempty"`
+	// Phase title
+	Title string `json:"title"`
 }
 
 // Working directory and git context at session start
@@ -5783,32 +5921,6 @@ const (
 	ExtensionsLoadedExtensionStatusStarting ExtensionsLoadedExtensionStatus = "starting"
 )
 
-// Operation gated by a factory permission request.
-type FactoryPermissionOperation string
-
-const (
-	// Authoring a factory, which writes JavaScript into a session-scoped extension and loads it.
-	FactoryPermissionOperationAuthor FactoryPermissionOperation = "author"
-	// Running a registered factory, which spends subagents, active time, and AI credits under the approved limits.
-	FactoryPermissionOperationRun FactoryPermissionOperation = "run"
-)
-
-// Terminal status a factory run committed. A settled run is never `pending` or `running`, so those two members of the run-status domain are deliberately absent.
-type FactoryRunSettledStatus string
-
-const (
-	// The run was cancelled by its caller or by session disposal.
-	FactoryRunSettledStatusCancelled FactoryRunSettledStatus = "cancelled"
-	// The factory body resolved and its result was committed.
-	FactoryRunSettledStatusCompleted FactoryRunSettledStatus = "completed"
-	// The run failed, with `failureType` carrying the class when it has one.
-	FactoryRunSettledStatusError FactoryRunSettledStatus = "error"
-	// The run was stopped by a limit, an approval refusal or another policy decision.
-	FactoryRunSettledStatusHalted FactoryRunSettledStatus = "halted"
-	// The attempt paused intentionally while preserving resumable run state.
-	FactoryRunSettledStatusPaused FactoryRunSettledStatus = "paused"
-)
-
 // Conversation scope in which a HydraFusion phase executes.
 // Experimental: FusionConversationScope is part of an experimental API and may change or be removed.
 type FusionConversationScope string
@@ -6064,6 +6176,28 @@ const (
 	ModelCallFailureTransportWebsocket ModelCallFailureTransport = "websocket"
 )
 
+// Final bounded result of one logical model operation after its internal retry loop settles
+type ModelCallFinalResult string
+
+const (
+	// The final attempt failed with HTTP 400.
+	ModelCallFinalResultHTTP400 ModelCallFinalResult = "http_400"
+	// The final attempt failed with HTTP 413.
+	ModelCallFinalResultHTTP413 ModelCallFinalResult = "http_413"
+	// The final attempt failed with HTTP 429.
+	ModelCallFinalResultHTTP429 ModelCallFinalResult = "http_429"
+	// The final attempt failed with another HTTP 4xx status.
+	ModelCallFinalResultHTTP4xx ModelCallFinalResult = "http_4xx"
+	// The final attempt failed with an HTTP 5xx status.
+	ModelCallFinalResultHTTP5xx ModelCallFinalResult = "http_5xx"
+	// The final attempt failed without another bounded classification.
+	ModelCallFinalResultOtherError ModelCallFinalResult = "other_error"
+	// The final attempt succeeded.
+	ModelCallFinalResultSuccess ModelCallFinalResult = "success"
+	// The final attempt failed in the request transport.
+	ModelCallFinalResultTransportError ModelCallFinalResult = "transport_error"
+)
+
 // Final outcome of one logical model dispatch after response acceptance processing
 type ModelCallFinishedOutcome string
 
@@ -6076,6 +6210,14 @@ const (
 	ModelCallFinishedOutcomeRejected ModelCallFinishedOutcome = "rejected"
 	// The provider response was accepted for continued agent processing.
 	ModelCallFinishedOutcomeSuccess ModelCallFinishedOutcome = "success"
+)
+
+// Why the session no longer has an explicitly selected model.
+type ModelDeselectedReason string
+
+const (
+	// A host-managed provider snapshot no longer publishes the selected model.
+	ModelDeselectedReasonProviderWithdrawn ModelDeselectedReason = "provider_withdrawn"
 )
 
 // Binary result type discriminator. Use "image" for images and "resource" for other binary data.
@@ -6180,14 +6322,14 @@ const (
 	PermissionApprovalEvaluationReasonCodeUnreviewableScriptInvocation PermissionApprovalEvaluationReasonCode = "unreviewable-script-invocation"
 )
 
-// Which direction a message-backed authorization claim moves authority in.
+// Direction stored in a historical extractor claim. Current runtimes do not apply it.
 // Experimental: PermissionMessageAuthorizationPolarity is part of an experimental API and may change or be removed.
 type PermissionMessageAuthorizationPolarity string
 
 const (
-	// The human's words refused an effect.
+	// Historical claim recorded as a denial.
 	PermissionMessageAuthorizationPolarityDenial PermissionMessageAuthorizationPolarity = "denial"
-	// The human's words authorized an effect.
+	// Historical claim recorded as a grant.
 	PermissionMessageAuthorizationPolarityGrant PermissionMessageAuthorizationPolarity = "grant"
 )
 
@@ -6200,13 +6342,13 @@ const (
 	PermissionPromptRequestKindExtensionEnvAccess        PermissionPromptRequestKind = "extension-env-access"
 	PermissionPromptRequestKindExtensionManagement       PermissionPromptRequestKind = "extension-management"
 	PermissionPromptRequestKindExtensionPermissionAccess PermissionPromptRequestKind = "extension-permission-access"
-	PermissionPromptRequestKindFactory                   PermissionPromptRequestKind = "factory"
 	PermissionPromptRequestKindHook                      PermissionPromptRequestKind = "hook"
 	PermissionPromptRequestKindMCP                       PermissionPromptRequestKind = "mcp"
 	PermissionPromptRequestKindMemory                    PermissionPromptRequestKind = "memory"
 	PermissionPromptRequestKindPath                      PermissionPromptRequestKind = "path"
 	PermissionPromptRequestKindRead                      PermissionPromptRequestKind = "read"
 	PermissionPromptRequestKindURL                       PermissionPromptRequestKind = "url"
+	PermissionPromptRequestKindWorkflow                  PermissionPromptRequestKind = "workflow"
 	PermissionPromptRequestKindWrite                     PermissionPromptRequestKind = "write"
 )
 
@@ -6239,13 +6381,13 @@ const (
 	PermissionRequestKindExtensionEnvAccess        PermissionRequestKind = "extension-env-access"
 	PermissionRequestKindExtensionManagement       PermissionRequestKind = "extension-management"
 	PermissionRequestKindExtensionPermissionAccess PermissionRequestKind = "extension-permission-access"
-	PermissionRequestKindFactory                   PermissionRequestKind = "factory"
 	PermissionRequestKindHook                      PermissionRequestKind = "hook"
 	PermissionRequestKindMCP                       PermissionRequestKind = "mcp"
 	PermissionRequestKindMemory                    PermissionRequestKind = "memory"
 	PermissionRequestKindRead                      PermissionRequestKind = "read"
 	PermissionRequestKindShell                     PermissionRequestKind = "shell"
 	PermissionRequestKindURL                       PermissionRequestKind = "url"
+	PermissionRequestKindWorkflow                  PermissionRequestKind = "workflow"
 	PermissionRequestKindWrite                     PermissionRequestKind = "write"
 )
 
@@ -6286,12 +6428,23 @@ const (
 	PermissionResultKindApproved                                       PermissionResultKind = "approved"
 	PermissionResultKindApprovedForLocation                            PermissionResultKind = "approved-for-location"
 	PermissionResultKindApprovedForSession                             PermissionResultKind = "approved-for-session"
+	PermissionResultKindApprovedReadOnlyForSession                     PermissionResultKind = "approved-read-only-for-session"
 	PermissionResultKindCancelled                                      PermissionResultKind = "cancelled"
 	PermissionResultKindDeniedByContentExclusionPolicy                 PermissionResultKind = "denied-by-content-exclusion-policy"
 	PermissionResultKindDeniedByPermissionRequestHook                  PermissionResultKind = "denied-by-permission-request-hook"
 	PermissionResultKindDeniedByRules                                  PermissionResultKind = "denied-by-rules"
 	PermissionResultKindDeniedInteractivelyByUser                      PermissionResultKind = "denied-interactively-by-user"
 	PermissionResultKindDeniedNoApprovalRuleAndCouldNotRequestFromUser PermissionResultKind = "denied-no-approval-rule-and-could-not-request-from-user"
+)
+
+// Access a sandbox path grant confers
+type PermissionSandboxPathGrantAccess string
+
+const (
+	// Read access: the path is added to readonlyPaths.
+	PermissionSandboxPathGrantAccessRead PermissionSandboxPathGrantAccess = "read"
+	// Read and write access: the path is added to readwritePaths.
+	PermissionSandboxPathGrantAccessReadWrite PermissionSandboxPathGrantAccess = "readWrite"
 )
 
 // Binary result type discriminator. Use "image" for images and "resource" for other binary data.
@@ -6427,42 +6580,42 @@ const (
 	SystemNotificationAgentCompletedStatusFailed SystemNotificationAgentCompletedStatus = "failed"
 )
 
-// Terminal status reached by a factory execution attempt.
-type SystemNotificationFactoryCompletedStatus string
-
-const (
-	// The factory was cancelled.
-	SystemNotificationFactoryCompletedStatusCancelled SystemNotificationFactoryCompletedStatus = "cancelled"
-	// The factory completed successfully.
-	SystemNotificationFactoryCompletedStatusCompleted SystemNotificationFactoryCompletedStatus = "completed"
-	// The factory failed.
-	SystemNotificationFactoryCompletedStatusError SystemNotificationFactoryCompletedStatus = "error"
-	// The factory was halted.
-	SystemNotificationFactoryCompletedStatusHalted SystemNotificationFactoryCompletedStatus = "halted"
-	// The factory attempt paused intentionally.
-	SystemNotificationFactoryCompletedStatusPaused SystemNotificationFactoryCompletedStatus = "paused"
-)
-
-// Type discriminator for SystemNotificationFactoryPauseInfo.
-type SystemNotificationFactoryPauseInfoType string
-
-const (
-	SystemNotificationFactoryPauseInfoTypeCheckpoint SystemNotificationFactoryPauseInfoType = "checkpoint"
-	SystemNotificationFactoryPauseInfoTypeUser       SystemNotificationFactoryPauseInfoType = "user"
-)
-
 // Type discriminator for SystemNotification.
 type SystemNotificationType string
 
 const (
 	SystemNotificationTypeAgentCompleted         SystemNotificationType = "agent_completed"
 	SystemNotificationTypeAgentIdle              SystemNotificationType = "agent_idle"
-	SystemNotificationTypeFactoryCompleted       SystemNotificationType = "factory_completed"
 	SystemNotificationTypeInstructionDiscovered  SystemNotificationType = "instruction_discovered"
 	SystemNotificationTypeNewInboxMessage        SystemNotificationType = "new_inbox_message"
 	SystemNotificationTypeShellCompleted         SystemNotificationType = "shell_completed"
 	SystemNotificationTypeShellDetachedCompleted SystemNotificationType = "shell_detached_completed"
 	SystemNotificationTypeUnclassified           SystemNotificationType = "unclassified"
+	SystemNotificationTypeWorkflowCompleted      SystemNotificationType = "workflow_completed"
+)
+
+// Terminal status reached by a workflow execution attempt.
+type SystemNotificationWorkflowCompletedStatus string
+
+const (
+	// The workflow was cancelled.
+	SystemNotificationWorkflowCompletedStatusCancelled SystemNotificationWorkflowCompletedStatus = "cancelled"
+	// The workflow completed successfully.
+	SystemNotificationWorkflowCompletedStatusCompleted SystemNotificationWorkflowCompletedStatus = "completed"
+	// The workflow failed.
+	SystemNotificationWorkflowCompletedStatusError SystemNotificationWorkflowCompletedStatus = "error"
+	// The workflow was halted.
+	SystemNotificationWorkflowCompletedStatusHalted SystemNotificationWorkflowCompletedStatus = "halted"
+	// The workflow attempt paused intentionally.
+	SystemNotificationWorkflowCompletedStatusPaused SystemNotificationWorkflowCompletedStatus = "paused"
+)
+
+// Type discriminator for SystemNotificationWorkflowPauseInfo.
+type SystemNotificationWorkflowPauseInfoType string
+
+const (
+	SystemNotificationWorkflowPauseInfoTypeCheckpoint SystemNotificationWorkflowPauseInfoType = "checkpoint"
+	SystemNotificationWorkflowPauseInfoTypeUser       SystemNotificationWorkflowPauseInfoType = "user"
 )
 
 // Theme variant this icon is intended for
@@ -6549,6 +6702,32 @@ const (
 	UserMessageDeliveryQueued UserMessageDelivery = "queued"
 	// Injected into the current in-flight run while the agent was busy (immediate mode).
 	UserMessageDeliverySteering UserMessageDelivery = "steering"
+)
+
+// Operation gated by a workflow permission request.
+type WorkflowPermissionOperation string
+
+const (
+	// Authoring a workflow, which writes JavaScript into a session-scoped extension and loads it.
+	WorkflowPermissionOperationAuthor WorkflowPermissionOperation = "author"
+	// Running a registered workflow, which spends subagents, active time, and AI credits under the approved limits.
+	WorkflowPermissionOperationRun WorkflowPermissionOperation = "run"
+)
+
+// Terminal status a workflow run committed. A settled run is never `pending` or `running`, so those two members of the run-status domain are deliberately absent.
+type WorkflowRunSettledStatus string
+
+const (
+	// The run was cancelled by its caller or by session disposal.
+	WorkflowRunSettledStatusCancelled WorkflowRunSettledStatus = "cancelled"
+	// The workflow body resolved and its result was committed.
+	WorkflowRunSettledStatusCompleted WorkflowRunSettledStatus = "completed"
+	// The run failed, with `failureType` carrying the class when it has one.
+	WorkflowRunSettledStatusError WorkflowRunSettledStatus = "error"
+	// The run was stopped by a limit, an approval refusal or another policy decision.
+	WorkflowRunSettledStatusHalted WorkflowRunSettledStatus = "halted"
+	// The attempt paused intentionally while preserving resumable run state.
+	WorkflowRunSettledStatusPaused WorkflowRunSettledStatus = "paused"
 )
 
 // Hosting platform type of the repository (github or ado)

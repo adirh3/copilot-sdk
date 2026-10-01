@@ -12,6 +12,10 @@ import java.util.concurrent.CompletableFuture;
 
 import org.junit.jupiter.api.Test;
 
+import com.github.copilot.generated.rpc.DiagnosticLogLevel;
+import com.github.copilot.generated.rpc.DiagnosticSourcesConfiguration;
+import com.github.copilot.generated.rpc.DiagnosticsConfiguration;
+import com.github.copilot.generated.rpc.McpDiagnosticSourceConfiguration;
 import com.github.copilot.generated.rpc.SessionLimitsConfig;
 import com.github.copilot.rpc.AskUserVariant;
 import com.github.copilot.rpc.AutoModeSwitchResponse;
@@ -32,6 +36,7 @@ import com.github.copilot.rpc.LargeToolOutputConfig;
 import com.github.copilot.rpc.MemoryConfiguration;
 import com.github.copilot.rpc.ResumeSessionConfig;
 import com.github.copilot.rpc.ResumeSessionRequest;
+import com.github.copilot.rpc.ResumeSessionResponse;
 import com.github.copilot.rpc.SessionConfig;
 import com.github.copilot.rpc.SessionHooks;
 import com.github.copilot.rpc.ToolDefinition;
@@ -44,6 +49,56 @@ import com.github.copilot.rpc.UserInputResponse;
  * configureSession that are not reached by E2E tests.
  */
 public class SessionRequestBuilderTest {
+
+    @Test
+    void transcriptRecoveryOverridesAndResponseInAllModes() throws Exception {
+        var mapper = JsonRpcClient.getObjectMapper();
+        for (var mode : new CopilotClientMode[]{CopilotClientMode.COPILOT_CLI, CopilotClientMode.EMPTY}) {
+            for (Boolean choice : new Boolean[]{null, false, true}) {
+                var config = new ResumeSessionConfig();
+                if (choice != null) {
+                    config.setAllowTranscriptRecovery(choice);
+                }
+                var request = SessionRequestBuilder.buildResumeRequest("s1", config.clone(), mode);
+                var requestJson = mapper.readTree(mapper.writeValueAsBytes(request));
+                if (choice == null) {
+                    assertFalse(requestJson.has("allowTranscriptRecovery"));
+                } else {
+                    assertTrue(requestJson.has("allowTranscriptRecovery"));
+                    assertEquals(choice.booleanValue(), requestJson.path("allowTranscriptRecovery").asBoolean());
+                }
+            }
+        }
+
+        var response = mapper
+                .readValue(
+                        "{\"sessionId\":\"s1\",\"transcriptRecovery\":{\"plannedBackupPath\":\"backup.jsonl\","
+                                + "\"invalidLineNumbers\":[3,4],\"sessionStartMoved\":true}}",
+                        ResumeSessionResponse.class);
+        assertNotNull(response.transcriptRecovery());
+        assertEquals("backup.jsonl", response.transcriptRecovery().plannedBackupPath());
+        assertEquals(List.of(3, 4), response.transcriptRecovery().invalidLineNumbers());
+        assertTrue(response.transcriptRecovery().sessionStartMoved());
+        assertNull(mapper.readValue("{\"sessionId\":\"s1\"}", ResumeSessionResponse.class).transcriptRecovery());
+        assertNull(new ResumeSessionResponse("s1", null, null, null).transcriptRecovery());
+    }
+
+    @Test
+    void clearingTranscriptRecoveryRestoresRuntimeDefaultInAllModes() throws Exception {
+        var mapper = JsonRpcClient.getObjectMapper();
+        for (boolean choice : new boolean[]{false, true}) {
+            var config = new ResumeSessionConfig().setAllowTranscriptRecovery(choice);
+            assertEquals(choice, config.getAllowTranscriptRecovery().orElseThrow());
+            assertSame(config, config.clearAllowTranscriptRecovery());
+            assertTrue(config.getAllowTranscriptRecovery().isEmpty());
+            assertFalse(mapper.readTree(mapper.writeValueAsBytes(config)).has("allowTranscriptRecovery"));
+
+            var cli = SessionRequestBuilder.buildResumeRequest("s1", config.clone(), CopilotClientMode.COPILOT_CLI);
+            var empty = SessionRequestBuilder.buildResumeRequest("s1", config.clone(), CopilotClientMode.EMPTY);
+            assertFalse(mapper.readTree(mapper.writeValueAsBytes(cli)).has("allowTranscriptRecovery"));
+            assertFalse(mapper.readTree(mapper.writeValueAsBytes(empty)).has("allowTranscriptRecovery"));
+        }
+    }
 
     // =========================================================================
     // buildCreateRequest
@@ -105,6 +160,34 @@ public class SessionRequestBuilderTest {
         assertFalse(mapper.readTree(mapper.writeValueAsBytes(createRequest)).has("askUserVariant"));
         assertNull(resumeRequest.getAskUserVariant());
         assertFalse(mapper.readTree(mapper.writeValueAsBytes(resumeRequest)).has("askUserVariant"));
+    }
+
+    @Test
+    void diagnosticsAreForwardedAndOmittedForCreateAndColdResume() throws Exception {
+        var mapper = JsonRpcClient.getObjectMapper();
+        var createRequest = SessionRequestBuilder.buildCreateRequest(
+                new SessionConfig().setDiagnostics(diagnostics(DiagnosticLogLevel.DEBUG)).clone(),
+                "diagnostics-create");
+        var resumeRequest = SessionRequestBuilder.buildResumeRequest("diagnostics-resume",
+                new ResumeSessionConfig().setDiagnostics(diagnostics(DiagnosticLogLevel.TRACE)).clone());
+        var defaultCreateRequest = SessionRequestBuilder.buildCreateRequest(new SessionConfig(),
+                "diagnostics-default-create");
+        var defaultResumeRequest = SessionRequestBuilder.buildResumeRequest("diagnostics-default-resume",
+                new ResumeSessionConfig());
+
+        assertEquals(DiagnosticLogLevel.DEBUG, createRequest.getDiagnostics().sources().mcp().level());
+        assertEquals("debug", mapper.readTree(mapper.writeValueAsBytes(createRequest)).path("diagnostics")
+                .path("sources").path("mcp").path("level").asText());
+        assertEquals(DiagnosticLogLevel.TRACE, resumeRequest.getDiagnostics().sources().mcp().level());
+        assertEquals("trace", mapper.readTree(mapper.writeValueAsBytes(resumeRequest)).path("diagnostics")
+                .path("sources").path("mcp").path("level").asText());
+        assertFalse(mapper.readTree(mapper.writeValueAsBytes(defaultCreateRequest)).has("diagnostics"));
+        assertFalse(mapper.readTree(mapper.writeValueAsBytes(defaultResumeRequest)).has("diagnostics"));
+    }
+
+    private static DiagnosticsConfiguration diagnostics(DiagnosticLogLevel level) {
+        return new DiagnosticsConfiguration(
+                new DiagnosticSourcesConfiguration(new McpDiagnosticSourceConfiguration(level)));
     }
 
     @Test
@@ -313,8 +396,72 @@ public class SessionRequestBuilderTest {
         ResumeSessionRequest request = SessionRequestBuilder.buildResumeRequest("sid-1", null);
         assertEquals("sid-1", request.getSessionId());
         assertNull(request.getModel());
+        assertNull(request.getContinuePendingWork());
         assertTrue(request.getRequestPermission(), "requestPermission should be true even for null config");
         assertEquals("direct", request.getEnvValueMode(), "envValueMode should be 'direct' even for null config");
+    }
+
+    @Test
+    void continuePendingWorkIsForwardedAndSerializedOnResume() throws Exception {
+        var mapper = JsonRpcClient.getObjectMapper();
+        for (boolean enabled : new boolean[]{true, false}) {
+            var config = new ResumeSessionConfig().setContinuePendingWork(enabled);
+            assertEquals(enabled, config.getContinuePendingWork().orElseThrow());
+
+            var request = SessionRequestBuilder.buildResumeRequest("sid-pending", config.clone());
+            assertEquals(enabled, request.getContinuePendingWork());
+            var serialized = mapper.readTree(mapper.writeValueAsBytes(request));
+            assertTrue(serialized.has("continuePendingWork"));
+            assertEquals(enabled, serialized.get("continuePendingWork").booleanValue());
+        }
+    }
+
+    @Test
+    void continuePendingWorkIsOmittedWhenUnsetOrCleared() throws Exception {
+        var mapper = JsonRpcClient.getObjectMapper();
+        var config = new ResumeSessionConfig();
+        assertTrue(config.getContinuePendingWork().isEmpty());
+        var defaultRequest = SessionRequestBuilder.buildResumeRequest("sid-pending-default", config);
+        assertNull(defaultRequest.getContinuePendingWork());
+        assertFalse(mapper.readTree(mapper.writeValueAsBytes(defaultRequest)).has("continuePendingWork"));
+
+        config.setContinuePendingWork(true).clearContinuePendingWork();
+        var clearedRequest = SessionRequestBuilder.buildResumeRequest("sid-pending-cleared", config);
+        assertTrue(config.getContinuePendingWork().isEmpty());
+        assertFalse(mapper.readTree(mapper.writeValueAsBytes(clearedRequest)).has("continuePendingWork"));
+    }
+
+    @Test
+    void nullableContinuePendingWorkPreservesExplicitValuesAndClearsDefault() throws Exception {
+        var mapper = JsonRpcClient.getObjectMapper();
+        var config = new ResumeSessionConfig();
+        for (Boolean enabled : new Boolean[]{true, false}) {
+            assertSame(config, config.setContinuePendingWork(enabled));
+            var request = SessionRequestBuilder.buildResumeRequest("sid-pending", config.clone());
+            assertEquals(enabled, request.getContinuePendingWork());
+            assertEquals(enabled,
+                    mapper.readTree(mapper.writeValueAsBytes(request)).path("continuePendingWork").booleanValue());
+        }
+
+        assertSame(config, config.setContinuePendingWork((Boolean) null));
+        assertTrue(config.getContinuePendingWork().isEmpty());
+        var request = SessionRequestBuilder.buildResumeRequest("sid-pending-default", config.clone());
+        assertNull(request.getContinuePendingWork());
+        assertFalse(mapper.readTree(mapper.writeValueAsBytes(request)).has("continuePendingWork"));
+    }
+
+    @Test
+    void continuePendingWorkIsOmittedWhenRequestIsCleared() throws Exception {
+        var mapper = JsonRpcClient.getObjectMapper();
+        for (boolean enabled : new boolean[]{true, false}) {
+            var request = new ResumeSessionRequest();
+            request.setContinuePendingWork(enabled);
+            assertEquals(enabled, request.getContinuePendingWork());
+
+            request.clearContinuePendingWork();
+            assertNull(request.getContinuePendingWork());
+            assertFalse(mapper.readTree(mapper.writeValueAsBytes(request)).has("continuePendingWork"));
+        }
     }
 
     @Test

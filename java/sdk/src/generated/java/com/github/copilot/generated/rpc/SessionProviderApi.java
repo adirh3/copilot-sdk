@@ -75,4 +75,36 @@ public final class SessionProviderApi {
         return caller.invoke("session.provider.add", _p, SessionProviderAddResult.class);
     }
 
+    /**
+     * Authoritative BYOK provider and model registry snapshot to apply atomically to the session.
+     * <p>
+     * Note: the {@code sessionId} field in the params record is overridden
+     * by the session-scoped wrapper; any value provided is ignored.
+     *
+     * @apiNote This method is experimental and may change in a future version.
+     * @since 1.0.0
+     */
+    @CopilotExperimental
+    public CompletableFuture<SessionProviderSyncResult> sync(SessionProviderSyncParams params) {
+        com.fasterxml.jackson.databind.node.ObjectNode _p = MAPPER.valueToTree(params);
+        _p.put("sessionId", this.sessionId);
+        return caller.invoke("session.provider.sync", _p, SessionProviderSyncResult.class);
+    }
+
+    /**
+     * Host-managed model selection ids to withdraw from the session's BYOK registry.
+     * <p>
+     * Note: the {@code sessionId} field in the params record is overridden
+     * by the session-scoped wrapper; any value provided is ignored.
+     *
+     * @apiNote This method is experimental and may change in a future version.
+     * @since 1.0.0
+     */
+    @CopilotExperimental
+    public CompletableFuture<SessionProviderWithdrawResult> withdraw(SessionProviderWithdrawParams params) {
+        com.fasterxml.jackson.databind.node.ObjectNode _p = MAPPER.valueToTree(params);
+        _p.put("sessionId", this.sessionId);
+        return caller.invoke("session.provider.withdraw", _p, SessionProviderWithdrawResult.class);
+    }
+
 }

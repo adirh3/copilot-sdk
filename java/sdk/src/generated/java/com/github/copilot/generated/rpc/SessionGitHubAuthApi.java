@@ -61,12 +61,16 @@ public final class SessionGitHubAuthApi {
     /**
      * Identifies the target session.
      *
+     * @return a future that completes with the {@code AuthIdentity} value,
+     *     or {@code null} when the result is absent. Callers must handle the
+     *     {@code null} completion value.
+     *
      * @apiNote This method is experimental and may change in a future version.
      * @since 1.0.0
      */
     @CopilotExperimental
-    public CompletableFuture<Void> getCurrentAuthInfo() {
-        return caller.invoke("session.gitHubAuth.getCurrentAuthInfo", java.util.Map.of("sessionId", this.sessionId), Void.class);
+    public CompletableFuture<AuthIdentity> getCurrentAuthInfo() {
+        return caller.invoke("session.gitHubAuth.getCurrentAuthInfo", java.util.Map.of("sessionId", this.sessionId), AuthIdentity.class);
     }
 
     /**
@@ -83,12 +87,16 @@ public final class SessionGitHubAuthApi {
     /**
      * Identifies the target session.
      *
+     * @return a future that completes with the {@code AuthIdentity} value,
+     *     or {@code null} when the result is absent. Callers must handle the
+     *     {@code null} completion value.
+     *
      * @apiNote This method is experimental and may change in a future version.
      * @since 1.0.0
      */
     @CopilotExperimental
-    public CompletableFuture<Void> refreshCopilotUser() {
-        return caller.invoke("session.gitHubAuth.refreshCopilotUser", java.util.Map.of("sessionId", this.sessionId), Void.class);
+    public CompletableFuture<AuthIdentity> refreshCopilotUser() {
+        return caller.invoke("session.gitHubAuth.refreshCopilotUser", java.util.Map.of("sessionId", this.sessionId), AuthIdentity.class);
     }
 
     /**

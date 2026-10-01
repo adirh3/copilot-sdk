@@ -73,6 +73,15 @@ python chat.py
 
 ## Quick Start
 
+For experimental in-process AHP hosting, use `client.start_ahp_host(AhpHostOptions(...))`.
+Select `local_server=HostLocalServerOptions()` for a local listener,
+`github_environment=HostGitHubEnvironmentOptions(name="My app", compute_id="stable-installation-id")`
+for Mission Control/WPS, or both. Import the transport types from `copilot.rpc`.
+At least one transport is required. GitHub-only hosts have no `url` or `token`;
+`host.environment_id` exposes their Mission Control identity.
+See [runtime-supervised AHP hosting](../docs/runtime-supervised-host.md) for creation
+and resume callbacks, resident-session publication, ownership, and shared-snapshot E2Es.
+
 ```python
 import asyncio
 
@@ -134,10 +143,18 @@ Use `"user"` when you need to set it explicitly. Source is independent of delive
 mode and does not replace the session's `system_message` configuration, set billing
 flags, or use the notification API. `send_and_wait` can return `None` when the
 session goes idle without an assistant message; errors still propagate.
+Sub-agent events remain visible to listeners but do not complete the wait
+or supply its reply.
 
 ### Manual Resource Management
 
 If you need more control over the lifecycle, you can call `start()`, `stop()`, and `disconnect()` manually:
+
+For an SDK-owned stdio runtime, `stop()` and async context-manager exit request
+shutdown, close stdin, and wait up to 10 seconds for the process to finish host
+cleanup, including telemetry flushing. A process that does not exit is terminated,
+then killed if necessary, with bounded waits. `force_stop()` skips graceful cleanup;
+externally managed runtimes are not shut down.
 
 ```python
 import asyncio
@@ -239,6 +256,7 @@ All options are kw-only parameters:
 - `github_token` (str | None): GitHub token for authentication. When provided, takes priority over other auth methods.
 - `base_directory` (str | None): Base directory for Copilot data (session state, config, etc.). Sets `COPILOT_HOME` on the spawned CLI process. When `None`, the CLI defaults to `~/.copilot`. Useful in restricted environments where only specific directories are writable. Ignored when using a `UriRuntimeConnection`.
 - `extension_launch_provider` (ExtensionLaunchProviderHandler | None): Experimental connection-level resolver for extension launch profiles. The client installs the reverse-RPC handler and registers the provider during startup before sessions can be created.
+- `installation_confirmation_handler` (InstallationConfirmationHandler | None): Experimental connection-global human review for `installations.confirm`. Receives the typed request and one cancellation signal, and returns an explicit decision. Does not enable installation capabilities.
 - `use_logged_in_user` (bool | None): Whether to use logged-in user for authentication (default: True, but False when `github_token` is provided).
 - `telemetry` (dict | None): OpenTelemetry configuration for the CLI process. Providing this enables telemetry — no separate flag needed. See [Telemetry](#telemetry) below.
 - `session_fs` (dict | None): Connection-level session filesystem provider configuration.
@@ -267,6 +285,51 @@ conn = RuntimeConnection.for_stdio()
 conn.env = {"MY_VAR": "value"}
 client = CopilotClient(connection=conn)  # do NOT also pass env=... here
 ```
+
+### Installation confirmation (experimental)
+
+Set `installation_confirmation_handler` on `CopilotClient` to receive the
+runtime's `installations.confirm` callback through
+`InstallationConfirmationHandler`. The handler receives the generated
+`InstallationConfirmationRequest` and an `InstallationConfirmationContext`, and
+returns only an explicit `InstallationDecision` (or `"confirm"`, `"decline"` or
+`"cancel"`). The SDK echoes the original challenge and review fingerprint; it
+never infers approval.
+
+Match `operation_id` and `policy_session_id` against the original action on this
+exact connection before presenting the complete review. Missing legacy session
+metadata does not select a default session. Refuse unknown operations or
+incomplete reviews. Concurrent reviews are independent and do not block the
+request router.
+
+`context.cancelled` is an `asyncio.Event` set when this review is retired,
+whether by the runtime's numeric `$/cancelRequest`, runtime-enforced expiry, or
+loss of the original connection. Separately spawned UI work must observe this
+signal and close itself when it is set. A late handler result cannot approve a
+retired request. Dropping an outbound installation or OAuth future does not
+cancel that operation.
+
+Call `client.rpc.mcp.prepare_install(...)` before `apply_install(...)`. Register
+its inert runtime-issued `operation_id`, original expiry and captured session on
+this client before applying. Removal uses `plan_uninstall(...)` then
+`apply_uninstall(...)`; its `operation_id` identifies the operation, while
+`plan_handle` is the one-use removal input. Never interchange them. The
+`installations` namespace exposes `list`, `recover`, `status` and `cancel`.
+Control uncertain work using its original connection and operation ID, without
+selecting a replacement session or replaying apply.
+
+Owned OAuth uses `session.rpc.mcp.oauth.prepare_login(...)` to return `login_id`
+before browser, network or cached-reconnect work. Keep that ID with the original
+session and `expected_installation_id` for `login(...)` and `cancel_login(...)`.
+Preparation freezes reauthentication and display options. Dropping the login
+future is not a substitute for `cancel_login(...)`. Manual MCP OAuth retains its
+direct `login(...)` path.
+
+These methods require a matching runtime and available owned-lifecycle support.
+Capability negotiation does not promise availability; preserve typed refusals
+instead of falling back to raw configuration writes. Generated presence and
+transport tests do not establish a working installer, live OAuth or restart
+safety.
 
 ### In-process (FFI) transport
 
@@ -992,6 +1055,16 @@ session = await client.resume_session(
     on_permission_request=PermissionHandler.approve_all,
 )
 ```
+
+`allow_transcript_recovery` controls repair of a damaged transcript on resume.
+It defaults to `True` in all modes; set it to `False` to reject recovery. If repaired,
+`session.transcript_recovery` reports `planned_backup_path`,
+`invalid_line_numbers` (including discarded torn-tail lines), and
+`session_start_moved`; otherwise it is `None`. If repair is rejected, the
+existing `JsonRpcError` exposes the server's `code` and `data` (with
+`invalidLineNumbers` and `sessionStartMoved`) alongside its message.
+Disabling recovery still permits adding a missing newline after an intact final
+record; it rejects torn tails.
 
 ### Per-Tool Skip Permission
 

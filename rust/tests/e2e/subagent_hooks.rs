@@ -12,6 +12,7 @@ use github_copilot_sdk::{
     CopilotRequestHandler, forward_http,
 };
 use parking_lot::Mutex;
+use tokio::sync::watch;
 
 use super::support::{assistant_message_content, wait_for_event, with_e2e_context};
 
@@ -34,6 +35,9 @@ async fn should_invoke_pretooluse_and_posttooluse_hooks_for_sub_agent_tool_calls
 
                 let hook_log = Arc::new(Mutex::new(Vec::<HookEntry>::new()));
                 let request_log = Arc::new(RecordingRequestHandler::default());
+                let waiting_text = "I've launched an explore agent to read subagent-test.txt. Waiting for it to complete...";
+                let final_text = "The explore agent successfully read the file. The contents of **subagent-test.txt** are:\n\n```\nHello from subagent test!\n```";
+                let (parent_reply, parent_reply_observed) = watch::channel(false);
 
                 let client = ctx
                     .start_llm_client(
@@ -46,6 +50,7 @@ async fn should_invoke_pretooluse_and_posttooluse_hooks_for_sub_agent_tool_calls
                     .create_session(ctx.approve_all_session_config().with_hooks(Arc::new(
                         RecordingHooks {
                             log: Arc::clone(&hook_log),
+                            parent_reply_observed,
                         },
                     )))
                     .await
@@ -54,11 +59,19 @@ async fn should_invoke_pretooluse_and_posttooluse_hooks_for_sub_agent_tool_calls
                 let saw_final_response = Cell::new(false);
                 let completion = wait_for_event(
                     session.subscribe(),
-                    "parent's subagent result followed by session.idle",
+                    "parent waiting reply and subagent result followed by session.idle",
                     |event| {
+                        if !event.agent_id.as_deref().is_none_or(str::is_empty) {
+                            return false;
+                        }
                         if event.parsed_type() == SessionEventType::AssistantMessage {
                             let content = assistant_message_content(event);
-                            if content.contains("Hello from subagent test!") {
+                            if content == waiting_text {
+                                parent_reply
+                                    .send(true)
+                                    .expect("sub-agent hook should await the parent reply");
+                            }
+                            if content == final_text {
                                 saw_final_response.set(true);
                             }
                         }
@@ -75,6 +88,15 @@ async fn should_invoke_pretooluse_and_posttooluse_hooks_for_sub_agent_tool_calls
                     completion,
                 );
                 send_result.expect("send");
+                let history = session.get_events().await.expect("get durable history");
+                let replies: Vec<_> = history.iter()
+                    .filter(|event| event.agent_id.as_deref().is_none_or(str::is_empty)
+                        && event.parsed_type() == SessionEventType::AssistantMessage)
+                    .map(assistant_message_content)
+                    .filter(|content| *content == waiting_text || *content == final_text)
+                    .collect();
+                assert_eq!(replies, [waiting_text, final_text],
+                    "durable history must contain the waiting reply before the final reply");
 
                 let log = hook_log.lock().clone();
 
@@ -214,6 +236,28 @@ fn assert_subagent_request_metadata(records: &[RequestEntry]) {
 
 struct RecordingHooks {
     log: Arc<Mutex<Vec<HookEntry>>>,
+    parent_reply_observed: watch::Receiver<bool>,
+}
+
+fn is_subagent_view(tool_name: &str, session_id: &str, log: &[HookEntry]) -> bool {
+    tool_name == "view"
+        && log
+            .iter()
+            .find(|entry| entry.kind == "pre" && entry.tool_name == "task")
+            .is_some_and(|entry| entry.session_id != session_id)
+}
+
+#[test]
+fn only_child_view_waits_for_parent_reply() {
+    let parent_task = [HookEntry {
+        kind: "pre".to_string(),
+        tool_name: "task".to_string(),
+        session_id: "parent".to_string(),
+    }];
+    assert!(!is_subagent_view("view", "parent", &[]));
+    assert!(!is_subagent_view("view", "parent", &parent_task));
+    assert!(!is_subagent_view("task", "child", &parent_task));
+    assert!(is_subagent_view("view", "child", &parent_task));
 }
 
 #[async_trait]
@@ -223,11 +267,24 @@ impl SessionHooks for RecordingHooks {
         input: PreToolUseInput,
         _ctx: HookContext,
     ) -> Option<PreToolUseOutput> {
-        self.log.lock().push(HookEntry {
-            kind: "pre".to_string(),
-            tool_name: input.tool_name,
-            session_id: input.session_id,
-        });
+        let is_subagent_view = {
+            let mut log = self.log.lock();
+            let is_subagent_view = is_subagent_view(&input.tool_name, &input.session_id, &log);
+            log.push(HookEntry {
+                kind: "pre".to_string(),
+                tool_name: input.tool_name,
+                session_id: input.session_id,
+            });
+            is_subagent_view
+        };
+        if is_subagent_view {
+            // Keep the background agent from completing before the parent's waiting reply.
+            let mut parent_reply = self.parent_reply_observed.clone();
+            parent_reply
+                .wait_for(|observed| *observed)
+                .await
+                .expect("parent waiting reply should arrive before sub-agent view");
+        }
         Some(PreToolUseOutput {
             permission_decision: Some("allow".to_string()),
             ..PreToolUseOutput::default()

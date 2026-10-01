@@ -1,12 +1,14 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+
 name: "Block remove-before-merge paths"
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   merge_group:
 
 permissions:
-  pull-requests: read
+  contents: read
 
 jobs:
   check-paths:
@@ -14,19 +16,25 @@ jobs:
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 4
+        with:
+          fetch-depth: 2
       - name: Check for remove-before-merge paths in PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
         run: |
-          FILES=$(gh api repos/$REPO/pulls/$PR_NUMBER/files --paginate --jq '.[].filename')
-          BLOCKED=$(echo "$FILES" | grep -E '(^|/)[-a-zA-Z0-9_]+-remove-before-merge(/|$)' || true)
-          if [ -n "$BLOCKED" ]; then
+          # pull_request checks out the merge commit; its first parent is the base.
+          git rev-parse --verify HEAD^2 >/dev/null 2>&1 || {
+            echo "::error::Expected a pull request merge commit."
+            exit 1
+          }
+          FILES_FILE=$(mktemp)
+          trap 'rm -f "$FILES_FILE"' EXIT
+          git diff --name-only -z HEAD^1 HEAD > "$FILES_FILE"
+          if grep -zqE '(^|/)[-a-zA-Z0-9_]+-remove-before-merge(/|$)' "$FILES_FILE"; then
             echo "::error::This PR contains files under a 'remove-before-merge' directory. Remove them before merging."
             echo ""
             echo "Offending paths:"
-            echo "$BLOCKED"
+            grep -zE '(^|/)[-a-zA-Z0-9_]+-remove-before-merge(/|$)' "$FILES_FILE" | tr '\0' '\n'
             exit 1
           fi
           echo "No remove-before-merge paths found. ✅"

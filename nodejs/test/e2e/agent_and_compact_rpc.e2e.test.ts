@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { approveAll } from "../../src/index.js";
 import type { CustomAgentConfig } from "../../src/index.js";
 import { createSdkTestContext } from "./harness/sdkTestContext.js";
+import { waitForCondition } from "./harness/sdkTestHelper.js";
 
 describe("Agent Selection RPC", async () => {
     const { copilotClient: client } = await createSdkTestContext();
@@ -118,6 +119,48 @@ describe("Agent Selection RPC", async () => {
         expect(currentResult.agent).toBeNull();
 
         await session.disconnect();
+    });
+
+    it("should emit subagent selected and deselected events", async () => {
+        const session = await client.createSession({
+            onPermissionRequest: approveAll,
+            customAgents: [
+                {
+                    name: "test-agent",
+                    displayName: "Test Agent",
+                    description: "A test agent",
+                    prompt: "You are a test agent.",
+                },
+            ],
+        });
+        const events: Array<{ type: string; data: unknown }> = [];
+        const unsubscribe = session.on((event) => events.push(event));
+        try {
+            expect((await session.rpc.agent.select({ name: "test-agent" })).agent?.name).toBe(
+                "test-agent"
+            );
+            await waitForCondition(
+                () => events.some((event) => event.type === "subagent.selected"),
+                {
+                    timeoutMessage: `Missing subagent.selected event: ${JSON.stringify(events)}`,
+                }
+            );
+            const selected = events.find((event) => event.type === "subagent.selected");
+            expect(selected?.data).toMatchObject({
+                agentName: "test-agent",
+                agentDisplayName: "Test Agent",
+            });
+
+            await session.rpc.agent.deselect();
+            await waitForCondition(
+                () => events.some((event) => event.type === "subagent.deselected"),
+                { timeoutMessage: `Missing subagent.deselected event: ${JSON.stringify(events)}` }
+            );
+            expect((await session.rpc.agent.getCurrent()).agent).toBeNull();
+        } finally {
+            unsubscribe();
+            await session.disconnect();
+        }
     });
 
     it("should return empty list when no custom agents configured", async () => {

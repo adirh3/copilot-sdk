@@ -291,7 +291,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         var value = options.Environment is not null
             && options.Environment.TryGetValue(DefaultConnectionEnvVar, out var fromOptions)
                 ? fromOptions
-                : Environment.GetEnvironmentVariable(DefaultConnectionEnvVar);
+                : System.Environment.GetEnvironmentVariable(DefaultConnectionEnvVar);
 
         if (string.IsNullOrEmpty(value) || string.Equals(value, "stdio", StringComparison.OrdinalIgnoreCase))
         {
@@ -556,7 +556,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     /// </example>
     public async Task StopAsync()
     {
+        DisconnectAhpHosts();
         List<Exception> errors = [];
+        CancelPendingExternalTools();
 
         foreach (var session in _sessions.Values.ToArray())
         {
@@ -602,10 +604,8 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     /// </example>
     public async Task ForceStopAsync()
     {
-        foreach (var session in _sessions.Values)
-        {
-            session.CancelPendingExternalTools();
-        }
+        DisconnectAhpHosts();
+        CancelPendingExternalTools();
         _sessions.Clear();
         ClearGitHubTokenProviders();
 
@@ -694,31 +694,46 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
 
         if (ctx.CliProcess is { } childProcess)
         {
-            await CleanupCliProcessAsync(childProcess, ctx.StderrPump, errors, _logger);
+            await CleanupCliProcessAsync(childProcess, ctx.StderrPump, errors, _logger, gracefulRuntimeShutdown);
         }
 
         if (ctx.FfiHost is { } ffiHost)
         {
-            try { ffiHost.Dispose(); }
+            try { await Task.Run(ffiHost.Dispose).ConfigureAwait(false); }
             catch (Exception ex) { AddCleanupError(errors, ex, _logger); }
             _ffiHost = null;
         }
     }
 
-    private static async Task CleanupCliProcessAsync(Process childProcess, ProcessStderrPump? stderrPump, List<Exception>? errors, ILogger? logger)
+    private static async Task CleanupCliProcessAsync(Process childProcess, ProcessStderrPump? stderrPump, List<Exception>? errors, ILogger? logger, bool gracefulRuntimeShutdown = false)
     {
         var processExited = false;
 
         try
         {
+            if (gracefulRuntimeShutdown && childProcess.StartInfo.RedirectStandardInput && !childProcess.HasExited)
+            {
+                try
+                {
+                    // The native wrapper finalizes host telemetry after stdin EOF,
+                    // not when it acknowledges runtime.shutdown.
+                    childProcess.StandardInput.Close();
+                    await childProcess.WaitForExitAsync().WaitAsync(s_runtimeShutdownTimeout);
+                }
+                catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException)
+                {
+                    logger?.LogDebug(ex, "Graceful stdio runtime exit did not complete; terminating the process");
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+                {
+                    AddCleanupError(errors, ex, logger);
+                }
+            }
+
             if (!childProcess.HasExited)
             {
-                // The runtime completes all cleanup before responding to
-                // runtime.shutdown and then leaves termination to us; it
-                // deliberately keeps its JSON-RPC server alive to send the
-                // response and never self-exits. Waiting for a self-exit that
-                // will never come just wastes time, so terminate the child
-                // immediately and only wait to reap it.
+                // Force-stop, failed startup, and runtimes that ignore EOF still
+                // require explicit termination.
                 childProcess.Kill(entireProcessTree: true);
                 // Kill is asynchronous; wait for the root CLI process to exit so cleanup callers
                 // do not observe StopAsync/DisposeAsync completion while it is still tearing down.
@@ -1262,6 +1277,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 config.Streaming is true ? true : null,
                 config.IncludeSubAgentStreamingEvents,
                 config.McpServers,
+                config.Diagnostics,
                 config.McpOAuthTokenStorage,
                 config.AuthClientIdMetadataUrl,
                 "direct",
@@ -1293,6 +1309,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 GitHubTokenProviderRegistrationId: registrationId,
                 RemoteSession: config.RemoteSession,
                 Cloud: config.Cloud,
+                RefreshCustomInstructions: config.RefreshCustomInstructions,
                 InstructionDirectories: config.InstructionDirectories,
                 PluginDirectories: config.PluginDirectories,
                 DisabledMcpServers: config.DisabledMcpServers,
@@ -1372,6 +1389,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             session.SetOpenCanvases(response.OpenCanvases);
 
             await UpdateSessionOptionsForModeAsync(session, config, cancellationToken).ConfigureAwait(false);
+            CaptureAhpSession(session, request, ClientJsonContext.Default.CreateSessionRequest);
             if (registrationId is not null)
             {
                 session.SetGitHubTokenProviderRegistration(registrationId);
@@ -1516,6 +1534,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 config.Streaming is true ? true : null,
                 config.IncludeSubAgentStreamingEvents,
                 config.McpServers,
+                config.Diagnostics,
                 config.McpOAuthTokenStorage,
                 config.AuthClientIdMetadataUrl,
                 "direct",
@@ -1559,6 +1578,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 ManagedSettings: config.ManagedSettings,
                 EnableGitHubTelemetryForwarding: _options.OnGitHubTelemetry != null ? true : null,
                 AdditionalDirectories: config.AdditionalDirectories,
+                AllowTranscriptRecovery: config.AllowTranscriptRecovery,
                 HasSkillProvider: config.SkillProvider is not null ? true : null);
 
             var rpcTimestamp = Stopwatch.GetTimestamp();
@@ -1570,6 +1590,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 sessionId);
 
             session.WorkspacePath = response.WorkspacePath;
+            session.TranscriptRecovery = response.TranscriptRecovery;
             session.SetCapabilities(response.Capabilities);
             session.SetOpenCanvases(response.OpenCanvases);
 
@@ -1579,6 +1600,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             }
 
             await UpdateSessionOptionsForModeAsync(session, config, cancellationToken).ConfigureAwait(false);
+            CaptureAhpSession(session, request, ClientJsonContext.Default.ResumeSessionRequest);
             if (registrationId is not null)
             {
                 session.SetGitHubTokenProviderRegistration(registrationId);
@@ -2063,12 +2085,16 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     {
         var handler = _options.RequestHandler;
         var onGitHubTelemetry = _options.OnGitHubTelemetry;
+        var installationConfirmationHandler = _options.InstallationConfirmationHandler;
         return new ClientGlobalApiHandlers
         {
             ExtensionLaunchProvider = _options.ExtensionLaunchProvider,
             LlmInference = handler is null ? null : new LlmInferenceAdapter(handler, () => _serverRpc),
             GitHubTelemetry = onGitHubTelemetry is null ? null : new GitHubTelemetryAdapter(onGitHubTelemetry, _logger),
             GitHubToken = new GitHubTokenAdapter(this),
+            Installations = installationConfirmationHandler is null
+                ? null
+                : new InstallationConfirmationAdapter(installationConfirmationHandler),
         };
     }
 
@@ -2397,6 +2423,11 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             startInfo.Environment["COPILOT_DISABLE_KEYTAR"] = "1";
         }
 
+        if (options.Mode != CopilotClientMode.Empty)
+        {
+            startInfo.Environment["COPILOT_RUNTIME_PROCESS_FILE_LOGGING"] = "1";
+        }
+
         // Set telemetry environment variables if configured
         ApplyTelemetryEnvironment(startInfo.Environment, options.Telemetry);
 
@@ -2714,8 +2745,13 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             });
             if (_clientGlobalApis is not null)
             {
+                if (_clientGlobalApis.Installations is InstallationConfirmationAdapter installationConfirmationAdapter)
+                {
+                    installationConfirmationAdapter.Attach(rpc);
+                }
                 ClientGlobalApiRegistration.RegisterClientGlobalApiHandlers(rpc, _clientGlobalApis);
             }
+            RegisterAhpHandlers(rpc);
             if (cliProcess is not null)
             {
                 RegisterRpcProcessExit(cliProcess, rpc);
@@ -2801,6 +2837,16 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         {
             return;
         }
+        DisconnectAhpHosts();
+        CancelPendingExternalTools();
+    }
+
+    private void CancelPendingExternalTools()
+    {
+        if (_clientGlobalApis?.LlmInference is LlmInferenceAdapter llmInferenceAdapter)
+        {
+            llmInferenceAdapter.CancelPending();
+        }
         foreach (var session in _sessions.Values)
         {
             session.CancelPendingExternalTools();
@@ -2885,16 +2931,12 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
 
     private class RpcHandler(CopilotClient client)
     {
-        public void OnSessionEvent(string sessionId, JsonElement? @event)
+        public void OnSessionEvent(string sessionId, SessionEvent? @event)
         {
             var session = client.GetSession(sessionId);
             if (session != null && @event != null)
             {
-                var evt = SessionEvent.FromJson(@event.Value.GetRawText());
-                if (evt != null)
-                {
-                    session.DispatchEvent(evt);
-                }
+                session.DispatchEvent(@event);
             }
         }
 
@@ -2914,9 +2956,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             evt.SessionId = sessionId;
             if (metadata is not null)
             {
-                evt.Metadata = JsonSerializer.Deserialize(
-                    metadata.Value.GetRawText(),
-                    TypesJsonContext.Default.SessionLifecycleEventMetadata);
+                evt.Metadata = metadata.Value.Deserialize(TypesJsonContext.Default.SessionLifecycleEventMetadata);
             }
 
             client.DispatchLifecycleEvent(evt);
@@ -3099,6 +3139,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         bool? Streaming,
         bool? IncludeSubAgentStreamingEvents,
         IDictionary<string, McpServerConfig>? McpServers,
+        DiagnosticsConfiguration? Diagnostics,
         McpOAuthTokenStorageMode? McpOAuthTokenStorage,
         string? AuthClientIdMetadataUrl,
         string? EnvValueMode,
@@ -3130,6 +3171,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         [property: JsonPropertyName("gitHubTokenProviderRegistrationId")] string? GitHubTokenProviderRegistrationId = null,
         RemoteSessionMode? RemoteSession = null,
         CloudSessionOptions? Cloud = null,
+        bool? RefreshCustomInstructions = null,
         IList<string>? InstructionDirectories = null,
         IList<string>? PluginDirectories = null,
         [property: JsonPropertyName("disabledMcpServers")] IList<string>? DisabledMcpServers = null,
@@ -3230,6 +3272,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         bool? Streaming,
         bool? IncludeSubAgentStreamingEvents,
         IDictionary<string, McpServerConfig>? McpServers,
+        DiagnosticsConfiguration? Diagnostics,
         McpOAuthTokenStorageMode? McpOAuthTokenStorage,
         string? AuthClientIdMetadataUrl,
         string? EnvValueMode,
@@ -3274,6 +3317,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         bool? EnableGitHubTelemetryForwarding = null,
         [property: JsonPropertyName("githubMcpToolConfig")] GitHubMcpToolConfig? GitHubMcpToolConfig = null,
         IList<string>? AdditionalDirectories = null,
+        bool? AllowTranscriptRecovery = null,
         bool? HasSkillProvider = null);
 #pragma warning restore GHCP001
 
@@ -3282,7 +3326,8 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         string? WorkspacePath,
         SessionCapabilities? Capabilities = null,
 #pragma warning disable GHCP001
-        IList<OpenCanvasInstance>? OpenCanvases = null);
+        IList<OpenCanvasInstance>? OpenCanvases = null,
+        TranscriptRecoveryReport? TranscriptRecovery = null);
 #pragma warning restore GHCP001
 
     internal record CommandWireDefinition(
@@ -3381,6 +3426,11 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         NumberHandling = JsonNumberHandling.AllowReadingFromString,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
     [JsonSerializable(typeof(CreateSessionRequest))]
+    [JsonSerializable(typeof(SessionConfig))]
+    [JsonSerializable(typeof(ResumeSessionConfig))]
+    [JsonSerializable(typeof(AhpMaterializeRequest))]
+    [JsonSerializable(typeof(AhpMaterializeResult))]
+    [JsonSerializable(typeof(AhpReleaseRequest))]
     [JsonSerializable(typeof(CreateSessionResponse))]
     [JsonSerializable(typeof(AutoModeSwitchRequest))]
     [JsonSerializable(typeof(AutoModeSwitchRequestResponse))]

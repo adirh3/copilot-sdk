@@ -1,14 +1,68 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import type { JSONSchema7 } from "json-schema";
 
 import {
     collectNestedDiscriminatedUnionTypeNames,
+    generateApiMethod,
+    generateRpcClass,
+    isMainModule,
     renderEventVariantClass,
     renderRpcTypes,
+    renderRpcWrappers,
     schemaTypeToJava,
 } from "./java.js";
 import { RPC_VARIANT_OWNERS } from "./rpc-variant-owners.js";
+
+test("arbitrary handoff maps accept scalar and structured JSON values", () => {
+    const result = schemaTypeToJava(
+        { type: "object", additionalProperties: true },
+        true, "HostCreateSessionParams", "config", new Map(),
+    );
+    assert.equal(result.javaType, "Map<String, Object>");
+    assert.ok(result.imports.has("java.util.Map"));
+});
+
+test("preserves diagnostics configuration for session create and resume", async () => {
+    const files = await renderRpcTypes({
+        definitions: {
+            DiagnosticsConfiguration: {
+                type: "object",
+                properties: { sources: { $ref: "#/definitions/DiagnosticSourcesConfiguration" } },
+                required: ["sources"],
+            },
+            DiagnosticSourcesConfiguration: {
+                type: "object",
+                properties: { mcp: { type: "string" } },
+            },
+        },
+    }, {});
+    const configuration = [...files].find(([file]) => file.endsWith("/DiagnosticsConfiguration.java"));
+    assert.ok(configuration, "startup diagnostics must have a named generated configuration");
+    assert.match(configuration[1], /DiagnosticSourcesConfiguration sources/);
+    assert.ok([...files.keys()].some((file) => file.endsWith("/DiagnosticSourcesConfiguration.java")));
+});
+
+test("recognizes an entrypoint reached through a linked directory", (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-java-codegen-entrypoint-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const sourceDirectory = path.join(root, "source");
+    const linkedDirectory = path.join(root, "linked");
+    fs.mkdirSync(sourceDirectory);
+    fs.writeFileSync(path.join(sourceDirectory, "java.ts"), "");
+    fs.symlinkSync(sourceDirectory, linkedDirectory, process.platform === "win32" ? "junction" : "dir");
+
+    assert.equal(
+        isMainModule(
+            path.join(linkedDirectory, "java.ts"),
+            path.join(sourceDirectory, "java.ts"),
+        ),
+        true,
+    );
+});
 
 function renderPayload(dataSchema: JSONSchema7): string {
     return renderEventVariantClass({
@@ -173,6 +227,191 @@ test("nested discriminated array items use their named Java type", () => {
     assert.deepEqual([...promotedUnionTypes], ["ActionChoice", "ActionSource"]);
 });
 
+test("RPC records promote nested discriminated union references to sealed interfaces", async () => {
+    const definitions: Record<string, JSONSchema7> = {
+        InstallationConfirmationRequest: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                review: { $ref: "#/definitions/InstallationReview" },
+            },
+        },
+        InstallationReview: {
+            anyOf: [
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        resource: { type: "string", const: "mcp" },
+                        review: { $ref: "#/definitions/McpInstallationReview" },
+                    },
+                    required: ["resource", "review"],
+                },
+            ],
+        },
+        McpInstallationReview: {
+            anyOf: [
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        action: { type: "string", const: "install" },
+                        selectedChoice: { $ref: "#/definitions/McpPlanTransportChoice" },
+                    },
+                    required: ["action", "selectedChoice"],
+                },
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        action: { type: "string", const: "uninstall" },
+                        installationId: { type: "string" },
+                    },
+                    required: ["action", "installationId"],
+                },
+            ],
+        },
+        McpInstallPlan: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                transportChoices: {
+                    type: "array",
+                    items: { $ref: "#/definitions/McpPlanTransportChoice" },
+                },
+            },
+        },
+        McpPlanTransportChoice: {
+            anyOf: [
+                { $ref: "#/definitions/McpPlanTransportChoicePackage" },
+                { $ref: "#/definitions/McpPlanTransportChoiceRemote" },
+            ],
+        },
+        McpPlanTransportChoicePackage: {
+            type: "object",
+            title: "McpPlanTransportChoicePackage",
+            additionalProperties: false,
+            properties: {
+                installMethod: { type: "string", const: "package" },
+                packageIdentifier: { type: "string" },
+            },
+            required: ["installMethod", "packageIdentifier"],
+        },
+        McpPlanTransportChoiceRemote: {
+            type: "object",
+            title: "McpPlanTransportChoiceRemote",
+            additionalProperties: false,
+            properties: {
+                installMethod: { type: "string", const: "remote" },
+                endpoint: { type: "string" },
+            },
+            required: ["installMethod", "endpoint"],
+        },
+        McpInstallationManagementResult: {
+            anyOf: [
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        kind: { type: "string", const: "outcome" },
+                        outcome: { $ref: "#/definitions/McpInstallationManagementOutcome" },
+                    },
+                    required: ["kind", "outcome"],
+                },
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        kind: { type: "string", const: "invalid-request" },
+                        message: { type: "string" },
+                    },
+                    required: ["kind", "message"],
+                },
+            ],
+        },
+        McpInstallationManagementOutcome: {
+            anyOf: [
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        kind: { type: "string", const: "operation" },
+                        operation: { $ref: "#/definitions/McpInstallationOperationStatus" },
+                    },
+                    required: ["kind", "operation"],
+                },
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        kind: { type: "string", const: "refused" },
+                        reason: { type: "string" },
+                    },
+                    required: ["kind", "reason"],
+                },
+            ],
+        },
+        McpInstallationOperationStatus: {
+            anyOf: [
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        phase: { type: "string", const: "preparing" },
+                        operationId: { type: "string" },
+                    },
+                    required: ["phase", "operationId"],
+                },
+                {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                        phase: { type: "string", const: "completed" },
+                        operationId: { type: "string" },
+                    },
+                    required: ["phase", "operationId"],
+                },
+            ],
+        },
+    };
+
+    const files = await renderRpcTypes({
+        definitions,
+        clientGlobal: {
+            confirm: {
+                rpcMethod: "confirm",
+                params: { $ref: "#/definitions/InstallationConfirmationRequest" },
+                result: null,
+            },
+            plan: {
+                rpcMethod: "plan",
+                params: { $ref: "#/definitions/McpInstallPlan" },
+                result: null,
+            },
+        },
+        server: {
+            status: {
+                rpcMethod: "status",
+                params: null,
+                result: { $ref: "#/definitions/McpInstallationManagementResult" },
+            },
+        },
+    }, {});
+
+    assert.match(rpcSource(files, "InstallationConfirmationRequest"), /@JsonProperty\("review"\) McpInstallationReview review/);
+    assert.match(rpcSource(files, "McpInstallPlan"), /@JsonProperty\("transportChoices"\) List<McpPlanTransportChoice> transportChoices/);
+    assert.match(rpcSource(files, "McpInstallationManagementResultOutcome"), /private McpInstallationManagementOutcome outcome/);
+    assert.match(rpcSource(files, "McpInstallationManagementOutcomeOperation"), /@JsonProperty\("operation"\) McpInstallationOperationStatus operation/);
+    assert.match(rpcSource(files, "McpInstallationReview"), /public sealed interface McpInstallationReview permits McpInstallationReviewInstall, McpInstallationReviewUninstall/);
+    assert.match(rpcSource(files, "McpInstallationReview"), /JsonTypeInfo\.Id\.NAME, include = JsonTypeInfo\.As\.EXISTING_PROPERTY, property = "action", visible = true/);
+    assert.match(rpcSource(files, "McpInstallationReviewInstall"), /public record McpInstallationReviewInstall\(/);
+    assert.match(rpcSource(files, "McpInstallationReviewInstall"), /action = "install"/);
+    assert.match(rpcSource(files, "McpInstallationReviewInstall"), /import com\.fasterxml\.jackson\.annotation\.JsonTypeInfo;/);
+    assert.match(rpcSource(files, "McpInstallationReviewInstall"), /@JsonTypeInfo\(use = JsonTypeInfo\.Id\.NONE\)/);
+    assert.match(rpcSource(files, "McpPlanTransportChoice"), /property = "installMethod"/);
+    assert.match(rpcSource(files, "McpInstallationOperationStatus"), /property = "phase"/);
+});
+
 function sharedUnionFixture(roots: string[]) {
     const definitions: Record<string, JSONSchema7> = {
         SharedError: {
@@ -201,6 +440,71 @@ function rpcSource(files: Map<string, string>, name: string): string {
     return source;
 }
 
+test("static OAuth config preserves the legacy four-argument constructor", () => {
+    const typeName = "McpOauthRequiredStaticClientConfig";
+    const source = generateRpcClass(typeName, {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+            clientId: { type: "string" },
+            clientSecret: { type: ["string", "null"] },
+            publicClient: { type: ["boolean", "null"] },
+            grantType: { type: ["string", "null"] },
+            scope: { type: ["string", "null"] },
+        },
+        required: ["clientId"],
+    }, new Map(), "com.github.copilot.generated").code;
+    assert.match(
+        source,
+        /public McpOauthRequiredStaticClientConfig\(\s*String clientId,\s*String clientSecret,\s*Boolean publicClient,\s*String grantType\s*\) \{\s*this\(clientId, clientSecret, publicClient, grantType, null\);/s
+    );
+});
+
+test("nullable referenced RPC results retain their object DTO and typed wrapper", async () => {
+    const method = {
+        rpcMethod: "session.accounts.getCurrent",
+        stability: "experimental",
+        params: {
+            type: "object",
+            properties: { sessionId: { type: "string" } },
+            required: ["sessionId"],
+        } as JSONSchema7,
+        result: { $ref: "#/definitions/SessionAccountResult" },
+    };
+    const files = await renderRpcTypes({
+        session: { accounts: { getCurrent: method } },
+        definitions: {
+            SessionAccountResult: {
+                title: "SessionAccountResult",
+                anyOf: [{ $ref: "#/definitions/SessionAccount" }, { type: "null" }],
+            },
+            SessionAccount: {
+                type: "object",
+                title: "SessionAccount",
+                additionalProperties: false,
+                properties: {
+                    accountId: { type: "string" },
+                    identity: { $ref: "#/definitions/Identity" },
+                },
+                required: ["accountId", "identity"],
+                stability: "experimental",
+            } as JSONSchema7,
+            Identity: {
+                type: "object",
+                title: "Identity",
+                properties: { login: { type: "string" } },
+                required: ["login"],
+            },
+        },
+    }, {});
+    assert.match(rpcSource(files, "SessionAccount"), /public record SessionAccount\(/);
+    assert.match(rpcSource(files, "SessionAccount"), /@JsonProperty\("identity"\) Identity identity/);
+    assert.match(rpcSource(files, "Identity"), /@JsonProperty\("login"\) String login/);
+    const wrapper = generateApiMethod("getCurrent", method, true, "this.sessionId").lines.join("\n");
+    assert.match(wrapper, /CompletableFuture<SessionAccount> getCurrent\(\)/);
+    assert.match(wrapper, /caller\.invoke\("session\.accounts\.getCurrent", .*SessionAccount\.class\)/);
+    assert.doesNotMatch(wrapper, /Void/);
+});
 for (const roots of [
     ["FirstResult", "HistoricalResult"],
     ["FirstResult", "HistoricalResult", "LastResult"],
@@ -293,4 +597,186 @@ test("historical ABI registry retains the complete pre-intake ownership set", ()
     for (const name of ["CatalogNegotiationRefusedError", "CatalogInvalidRequestError", "CatalogUnavailableError"]) {
         assert.equal(RPC_VARIANT_OWNERS[name], "CatalogSearchResult");
     }
+});
+
+type LegacyScope = "server" | "session";
+
+/** A request published with `contract`, `source` and `scope`, then extended with optional fields. */
+function legacyRequestFixture(additions: 0 | 1 | 2, scope: LegacyScope = "server", legacy = ["contract", "source", "scope"]) {
+    const properties: Record<string, JSONSchema7> = {
+        ...(scope === "session" ? { sessionId: { type: "string" } } : {}),
+        contract: { type: "string", description: "Caller contract." },
+        source: { type: "string" },
+        scope: { type: "string" },
+    };
+    if (additions >= 1) properties.policySessionId = { type: "string" };
+    if (additions >= 2) properties.traceId = { type: "string" };
+    const request: JSONSchema7 & Record<string, unknown> = {
+        type: "object",
+        properties,
+        required: [...(scope === "session" ? ["sessionId"] : []), "contract", "source"],
+        additionalProperties: false,
+    };
+    if (additions > 0) request["x-legacy-parameters"] = legacy;
+    const rpcMethod = `${scope === "session" ? "session." : ""}sample.plan`;
+    return {
+        [scope]: {
+            sample: {
+                plan: {
+                    rpcMethod,
+                    params: { $ref: "#/definitions/SamplePlanRequest" },
+                    result: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+                },
+            },
+        },
+        definitions: { SamplePlanRequest: request },
+    } as Parameters<typeof renderRpcTypes>[0];
+}
+
+function generatedFile(files: Map<string, string>, className: string): string | undefined {
+    return [...files].find(([file]) => file.endsWith(`/${className}.java`))?.[1];
+}
+
+async function renderLegacy(additions: 0 | 1 | 2, scope: LegacyScope = "server") {
+    const fixture = legacyRequestFixture(additions, scope);
+    const types = await renderRpcTypes(fixture, {});
+    const wrappers = await renderRpcWrappers(fixture);
+    const prefix = scope === "session" ? "Session" : "";
+    return {
+        params: generatedFile(types, `${prefix}SamplePlanParams`)!,
+        request: generatedFile(types, "SamplePlanRequest"),
+        api: generatedFile(wrappers, `${scope === "session" ? "Session" : "Server"}SampleApi`)!,
+    };
+}
+
+function publicConstructor(source: string): string | undefined {
+    return source.match(/public SamplePlanRequest\([^)]*\)/)?.[0];
+}
+
+test("x-legacy-parameters keeps the params record and adds a fluent request with a same-name overload", async () => {
+    const original = await renderLegacy(0);
+    assert.equal(original.request, undefined, "unmarked requests keep their existing generation");
+    assert.doesNotMatch(original.api, /SamplePlanRequest/);
+
+    const once = await renderLegacy(1);
+    assert.equal(once.params, original.params, "the params record keeps exactly its legacy components");
+    assert.ok(once.request);
+    assert.match(once.request, /public final class SamplePlanRequest \{/);
+    assert.equal(publicConstructor(once.request), "public SamplePlanRequest(String contract, String source)");
+    assert.match(once.request, /this\.contract = Objects\.requireNonNull\(contract, "contract"\);/);
+    assert.match(once.request, /public SamplePlanRequest setScope\(String value\)/);
+    assert.match(once.request, /public SamplePlanRequest setPolicySessionId\(String value\)/);
+    assert.match(once.request, /@JsonProperty\("policySessionId"\)\s+private String policySessionId;/);
+    assert.match(once.api, /public CompletableFuture<SamplePlanResult> plan\(SamplePlanParams params\) \{\s+return caller\.invoke\("sample\.plan", params,/);
+    assert.match(once.api, /public CompletableFuture<SamplePlanResult> plan\(SamplePlanRequest request\) \{\s+return caller\.invoke\("sample\.plan", Objects\.requireNonNull\(request, "request"\),/);
+
+    const twice = await renderLegacy(2);
+    assert.equal(twice.params, original.params, "a second optional addition leaves the record unchanged");
+    assert.equal(publicConstructor(twice.request!), publicConstructor(once.request));
+    assert.match(twice.request!, /public SamplePlanRequest setTraceId\(String value\)/);
+    const overloads = (api: string) => api.match(/public CompletableFuture<SamplePlanResult> plan\([^)]*\)/g);
+    assert.deepEqual(overloads(twice.api), overloads(once.api));
+});
+
+test("x-legacy-parameters session requests keep sessionId injected by the wrapper", async () => {
+    const original = await renderLegacy(0, "session");
+    const once = await renderLegacy(1, "session");
+    assert.equal(once.params, original.params);
+    assert.match(once.params, /@JsonProperty\("sessionId"\) String sessionId/);
+    assert.doesNotMatch(once.request!, /sessionId/);
+    assert.match(
+        once.api,
+        /plan\(SamplePlanRequest request\) \{\s+com\.fasterxml\.jackson\.databind\.node\.ObjectNode _p = MAPPER\.valueToTree\(Objects\.requireNonNull\(request, "request"\)\);\s+_p\.put\("sessionId", this\.sessionId\);\s+return caller\.invoke\("session\.sample\.plan", _p,/
+    );
+});
+
+test("x-legacy-parameters rejects metadata that would not preserve the original API", async () => {
+    await assert.rejects(
+        renderRpcTypes(legacyRequestFixture(1, "server", ["contract", "scope"]), {}),
+        /Invalid x-legacy-parameters for sample\.plan: required property source must be a legacy parameter/
+    );
+    await assert.rejects(
+        renderRpcTypes(legacyRequestFixture(1, "server", ["contract", "source", "missing"]), {}),
+        /unknown property missing/
+    );
+    await assert.rejects(
+        renderRpcTypes(legacyRequestFixture(1, "session", ["sessionId", "contract", "source"]), {}),
+        /implicit property sessionId cannot be a legacy parameter/
+    );
+    const client = legacyRequestFixture(1) as Record<string, unknown>;
+    client.clientSession = client.server;
+    delete client.server;
+    await assert.rejects(renderRpcTypes(client as Parameters<typeof renderRpcTypes>[0], {}), /only server and session requests are supported/);
+});
+
+/** A response record published with `name`, `status` and `error`, then extended with optional fields. */
+function legacyRecordSchema(additions: string[], legacy: string[] | undefined = ["name", "status", "error"]): JSONSchema7 {
+    const properties: Record<string, JSONSchema7> = {
+        name: { type: "string", description: "Server name." },
+        status: { type: "string" },
+    };
+    for (const addition of additions.filter((name) => name === "owned")) properties[addition] = { type: "string" };
+    properties.error = { type: "string" };
+    for (const addition of additions.filter((name) => name !== "owned")) properties[addition] = { type: "string" };
+    const schema: JSONSchema7 & Record<string, unknown> = { type: "object", properties, required: ["name", "status"] };
+    if (additions.length > 0 && legacy) schema["x-legacy-parameters"] = legacy;
+    return schema;
+}
+
+function recordSource(schema: JSONSchema7): string {
+    return generateRpcClass("SampleServer", schema, new Map(), "com.github.copilot.generated.rpc").code;
+}
+
+function legacyConstructors(source: string): string[] {
+    return [...source.matchAll(/public SampleServer\(([^)]*)\) \{\s*this\(([^)]*)\);/g)].map(
+        (match) => `${match[1].replace(/\s+/g, " ").trim()} => ${match[2]}`
+    );
+}
+
+test("x-legacy-parameters response records keep every component and add the previous constructor", () => {
+    const original = recordSource(legacyRecordSchema([]));
+    assert.deepEqual(legacyConstructors(original), [], "unmarked records keep their existing generation");
+
+    const trailing = recordSource(legacyRecordSchema(["traceId"]));
+    assert.match(trailing, /record SampleServer\(\s*\/\*\* Server name\. \*\/\s*@JsonProperty\("name"\) String name,\s*@JsonProperty\("status"\) String status,\s*@JsonProperty\("error"\) String error,\s*@JsonProperty\("traceId"\) String traceId\s*\)/);
+    assert.deepEqual(legacyConstructors(trailing), ["String name, String status, String error => name, status, error, null"]);
+
+    const middle = recordSource(legacyRecordSchema(["owned"]));
+    assert.deepEqual(legacyConstructors(middle), ["String name, String status, String error => name, status, null, error"]);
+
+    const twice = recordSource(legacyRecordSchema(["owned", "traceId"]));
+    assert.deepEqual(legacyConstructors(twice), ["String name, String status, String error => name, status, null, error, null"]);
+});
+
+test("x-legacy-parameters response records reject metadata a positional constructor cannot preserve", () => {
+    assert.throws(
+        () => recordSource(legacyRecordSchema(["traceId"], ["status", "name", "error"])),
+        /Invalid x-legacy-parameters for SampleServer: legacy parameters must follow schema property order/
+    );
+    assert.throws(
+        () => recordSource(legacyRecordSchema(["traceId"], ["name", "error"])),
+        /required property status must be a legacy parameter/
+    );
+});
+
+test("x-legacy-parameters response records get the constructor through standalone generation", async () => {
+    const files = await renderRpcTypes({
+        server: {
+            sample: {
+                list: {
+                    rpcMethod: "sample.list",
+                    params: null,
+                    result: {
+                        type: "object",
+                        properties: { servers: { type: "array", items: { $ref: "#/definitions/SampleServer" } } },
+                        required: ["servers"],
+                    },
+                },
+            },
+        },
+        definitions: { SampleServer: legacyRecordSchema(["owned"]) },
+    } as Parameters<typeof renderRpcTypes>[0], {});
+    assert.deepEqual(legacyConstructors(rpcSource(files, "SampleServer")), [
+        "String name, String status, String error => name, status, null, error",
+    ]);
 });

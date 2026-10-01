@@ -108,6 +108,62 @@ describe("Server-scoped RPC", async () => {
         await expect(client.rpc.managedSettings.clearCache()).resolves.toBeNull();
     });
 
+    it.skipIf(isInProcessTransport)("should round trip sessionless managed settings", async () => {
+        const policyPath = path.join(workDir, "managed-settings.json");
+        const policy = { model: "gpt-5.4", autoTier: "balance" };
+        fs.writeFileSync(policyPath, JSON.stringify(policy));
+        const policyClient = new CopilotClient({
+            workingDirectory: workDir,
+            connection: RuntimeConnection.forStdio({ path: process.env.COPILOT_CLI_PATH }),
+            useLoggedInUser: false,
+            env: {
+                ...env,
+                GH_TOKEN: "",
+                GITHUB_TOKEN: "",
+                COPILOT_GITHUB_TOKEN: "",
+                GITHUB_COPILOT_API_TOKEN: "",
+                COPILOT_HMAC_KEY: "",
+                CAPI_HMAC_KEY: "",
+                COPILOT_E2E_TEST_HOOKS: "1",
+                COPILOT_TEST_MANAGED_SETTINGS_FILE_PATH: policyPath,
+            },
+        });
+        onTestFinished(() => policyClient.stop());
+        await policyClient.start();
+
+        const api = policyClient.rpc.managedSettings;
+        const schema = await api.schema();
+        expect(schema.runtimeVersion).toEqual(expect.any(String));
+        expect(schema.schema).toHaveProperty("properties.model");
+
+        const validated = await api.validate({ content: policy });
+        expect(validated.valid).toBe(true);
+        expect(validated.settings).toEqual(policy);
+        expect(validated.diagnostics).toEqual([]);
+
+        const resolved = await api.resolve({});
+        expect(resolved.account).toBeUndefined();
+        expect(resolved.resolved.deviceManaged).toBe(true);
+        expect(resolved.values?.model).toBe(policy.model);
+        const device = resolved.layers.find((layer) => layer.source === "device");
+        expect(device?.settings).toMatchObject(policy);
+
+        const composed = await api.compose({
+            layers: [{ source: "device", settings: device?.settings }],
+        });
+        expect(composed.resolved.settings).toEqual(resolved.resolved.settings);
+        expect(composed.values).toEqual(resolved.values);
+        expect(composed.diagnostics).toEqual([]);
+        await expect(
+            api.compose({
+                // @ts-expect-error Exercise invalid wire input through the real server.
+                layers: [{ source: "device", settings: null }],
+            })
+        ).rejects.toMatchObject({ code: -32602 });
+        const absent = await api.compose({ layers: [{ source: "device" }] });
+        expect(absent.resolved.source).toBe("none");
+    });
+
     it("should reject llm inference response frames for missing request", async () => {
         await client.start();
 
@@ -215,6 +271,36 @@ describe("Server-scoped RPC", async () => {
         });
 
         expect(result.ok).toBe(true);
+    });
+
+    it("should report sandbox host support", async () => {
+        await client.start();
+        const host = await client.rpc.sandbox.getHostSupport();
+        expect(host.reason === undefined).toBe(host.supported);
+        expect(host.capabilities.map((capability) => capability.name).sort()).toEqual(
+            host.supported
+                ? [
+                      "denied_paths",
+                      "filesystem_enumeration",
+                      "network",
+                      "network_filtering",
+                      "shell",
+                  ]
+                : []
+        );
+        for (const capability of host.capabilities) {
+            expect(capability.reason === undefined).toBe(capability.supported);
+        }
+
+        const unsupportedClient = createClientWithEnv({
+            COPILOT_CLI_SANDBOX_SUPPORT_OVERRIDE: "unsupported",
+        });
+        await unsupportedClient.start();
+        expect(await unsupportedClient.rpc.sandbox.getHostSupport()).toEqual({
+            supported: false,
+            reason: "COPILOT_CLI_SANDBOX_SUPPORT_OVERRIDE=unsupported",
+            capabilities: [],
+        });
     });
 
     it("should list, find, and inspect persisted session state", async () => {
@@ -333,6 +419,42 @@ describe("Server-scoped RPC", async () => {
 
         // The server-side close disposes the session; do not call session.disconnect().
     });
+
+    it.skipIf(isInProcessTransport)(
+        "should observe a session held by another runtime and release its lock",
+        async () => {
+            const sessionId = randomUUID();
+            const otherClient = createClientWithEnv({});
+            const otherSession = await otherClient.createSession({
+                sessionId,
+                workingDirectory: createUniqueWorkDirectory("server-rpc-in-use"),
+                onPermissionRequest: () => ({ kind: "approve-once" }),
+            });
+
+            try {
+                await client.start();
+                await waitForCondition(
+                    async () =>
+                        (
+                            await client.rpc.sessions.checkInUse({ sessionIds: [sessionId] })
+                        ).inUse.includes(sessionId),
+                    { timeoutMessage: `Session ${sessionId} was not reported in use` }
+                );
+
+                await otherClient.rpc.sessions.releaseLock({ sessionId });
+                await waitForCondition(
+                    async () =>
+                        !(
+                            await client.rpc.sessions.checkInUse({ sessionIds: [sessionId] })
+                        ).inUse.includes(sessionId),
+                    { timeoutMessage: `Session ${sessionId} was still reported in use` }
+                );
+            } finally {
+                await otherSession.disconnect();
+                await otherClient.stop();
+            }
+        }
+    );
 
     it("should prune dry-run and bulkDelete persisted session", async () => {
         const sessionId = randomUUID();

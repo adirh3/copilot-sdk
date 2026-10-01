@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -111,6 +112,7 @@ import com.github.copilot.rpc.SessionUiApi;
 import com.github.copilot.rpc.SessionUiCapabilities;
 import com.github.copilot.rpc.ToolDefinition;
 import com.github.copilot.rpc.ToolResultObject;
+import com.github.copilot.rpc.TranscriptRecoveryReport;
 import com.github.copilot.rpc.UserInputHandler;
 import com.github.copilot.rpc.UserInputInvocation;
 import com.github.copilot.rpc.UserInputRequest;
@@ -182,13 +184,14 @@ public final class CopilotSession implements AutoCloseable {
      */
     private volatile String sessionId;
     private volatile String workspacePath;
+    private volatile TranscriptRecoveryReport transcriptRecovery;
     private volatile SessionCapabilities capabilities = new SessionCapabilities();
     private final Object openCanvasesLock = new Object();
     private final List<OpenCanvasInstance> openCanvases = new ArrayList<>();
     private final SessionUiApi ui;
     private final JsonRpcClient rpc;
     private volatile SessionRpc sessionRpc;
-    private final Set<Consumer<SessionEvent>> eventHandlers = ConcurrentHashMap.newKeySet();
+    private final Set<Consumer<SessionEvent>> eventHandlers = new CopyOnWriteArraySet<>();
     private final Map<String, ToolDefinition> toolHandlers = new ConcurrentHashMap<>();
     private final Map<String, PendingExternalTool> pendingExternalTools = new ConcurrentHashMap<>();
     private boolean externalToolsClosed;
@@ -358,6 +361,19 @@ public final class CopilotSession implements AutoCloseable {
      */
     void setWorkspacePath(String workspacePath) {
         this.workspacePath = workspacePath;
+    }
+
+    /**
+     * Gets the transcript repair details reported when this session was resumed.
+     *
+     * @return repair details, or {@code null} when no repair was reported
+     */
+    public TranscriptRecoveryReport getTranscriptRecovery() {
+        return transcriptRecovery;
+    }
+
+    void setTranscriptRecovery(TranscriptRecoveryReport transcriptRecovery) {
+        this.transcriptRecovery = transcriptRecovery;
     }
 
     /**
@@ -586,6 +602,11 @@ public final class CopilotSession implements AutoCloseable {
      * the future completes with {@link java.util.concurrent.CancellationException}.
      * If the timeout expires first, the future completes exceptionally with a
      * {@link TimeoutException}.
+     * <p>
+     * Sub-agent events with a non-empty agentId remain visible to subscribers but
+     * cannot complete this wait or supply its reply. Synchronous listeners
+     * registered before this call finish processing the root idle event before this
+     * wait completes.
      *
      * @param options
      *            the message options containing the prompt and attachments
@@ -611,6 +632,8 @@ public final class CopilotSession implements AutoCloseable {
         var firstAssistantMessageLogged = new java.util.concurrent.atomic.AtomicBoolean(false);
 
         Consumer<SessionEvent> handler = evt -> {
+            if (evt.getAgentId() != null && !evt.getAgentId().isEmpty())
+                return;
             if (evt instanceof AssistantMessageEvent msg) {
                 lastAssistantMessage.set(msg);
                 if (firstAssistantMessageLogged.compareAndSet(false, true)) {
@@ -667,15 +690,8 @@ public final class CopilotSession implements AutoCloseable {
             }
         }
 
-        // When inner future completes, run cleanup and propagate to result.
-        // Use whenCompleteAsync so that result.complete(r) is not called
-        // synchronously on the event-dispatch thread while dispatchEvent() is
-        // still iterating over handlers. Without async dispatch, a caller that
-        // registered its own session.on() listener before calling sendAndWait()
-        // could see its listener invoked *after* result.get() returned, because
-        // sendAndWait's internal handler would complete the future mid-loop. By
-        // submitting the completion to timeoutScheduler we allow the current
-        // dispatch loop to finish calling all other handlers first.
+        // Keep completion continuations off the event-dispatch thread. The ordered
+        // handler set, not this executor hop, ensures earlier listeners finish first.
         final ScheduledFuture<?> taskToCancel = timeoutTask;
         future.whenCompleteAsync((r, ex) -> {
             try {
@@ -913,7 +929,8 @@ public final class CopilotSession implements AutoCloseable {
      * The handler will be invoked for every event in this session, including
      * assistant messages, tool calls, and session state changes. For type-safe
      * handling of specific event types, prefer {@link #on(Class, Consumer)}
-     * instead.
+     * instead. A handler registered from an event handler does not receive the
+     * event currently being delivered.
      *
      * <p>
      * <b>Exception handling:</b> If a handler throws an exception, the error is
@@ -2370,7 +2387,7 @@ public final class CopilotSession implements AutoCloseable {
         ModelCapabilitiesOverrideSupports supports = null;
         if (modelCapabilities.getSupports() != null) {
             var s = modelCapabilities.getSupports();
-            supports = new ModelCapabilitiesOverrideSupports(s.getVision().orElse(null),
+            supports = new ModelCapabilitiesOverrideSupports(s.getVision().orElse(null), null,
                     s.getReasoningEffort().orElse(null), null);
         }
         ModelCapabilitiesOverrideLimits limits = null;

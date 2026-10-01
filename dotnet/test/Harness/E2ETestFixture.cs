@@ -30,6 +30,9 @@ public class E2ETestFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        await Ctx.DisposeAsync();
+        if (Ctx is not null)
+        {
+            await Ctx.DisposeAsync();
+        }
     }
 }

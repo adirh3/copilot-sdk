@@ -3,6 +3,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, it, onTestFinished } from "vitest";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
+import { fileURLToPath } from "url";
 import { z } from "zod";
 import { approveAll, CopilotClient, defineTool, RuntimeConnection } from "../../src/index.js";
 import type {
@@ -11,6 +14,7 @@ import type {
     PermissionRequest,
     PermissionRequestedEvent,
     PermissionRequestResult,
+    SessionEvent,
 } from "../../src/index.js";
 import { createSdkTestContext, DEFAULT_GITHUB_TOKEN } from "./harness/sdkTestContext.js";
 import { waitForCondition } from "./harness/sdkTestHelper.js";
@@ -136,7 +140,7 @@ function waitForPermissionRequest(session: CopilotSession): Promise<PermissionRe
 }
 
 describe("Pending work resume", async () => {
-    const { env, workDir } = await createSdkTestContext();
+    const { env, workDir, openAiEndpoint } = await createSdkTestContext();
     const SHARED_TOKEN = "pending-work-resume-shared-test-token";
 
     function createTcpServer(): CopilotClient {
@@ -181,6 +185,52 @@ describe("Pending work resume", async () => {
         return `localhost:${port}`;
     }
 
+    async function forceStopAfterSessionLockObserved(
+        suspendedClient: CopilotClient,
+        sessionId: string
+    ): Promise<void> {
+        const lockObserver = new CopilotClient({
+            workingDirectory: workDir,
+            env,
+            gitHubToken: DEFAULT_GITHUB_TOKEN,
+            connection: RuntimeConnection.forStdio({
+                path: process.env.COPILOT_CLI_PATH,
+            }),
+        });
+        try {
+            await lockObserver.start();
+            await waitForCondition(
+                async () => {
+                    const result = await lockObserver.rpc.sessions.checkInUse({
+                        sessionIds: [sessionId],
+                    });
+                    return result.inUse.includes(sessionId);
+                },
+                {
+                    timeoutMs: PENDING_WORK_TIMEOUT_MS,
+                    timeoutMessage: `Timed out waiting for session '${sessionId}' to acquire its lock.`,
+                }
+            );
+
+            await suspendedClient.forceStop();
+
+            await waitForCondition(
+                async () => {
+                    const result = await lockObserver.rpc.sessions.checkInUse({
+                        sessionIds: [sessionId],
+                    });
+                    return !result.inUse.includes(sessionId);
+                },
+                {
+                    timeoutMs: PENDING_WORK_TIMEOUT_MS,
+                    timeoutMessage: `Timed out waiting for session '${sessionId}' to release its lock.`,
+                }
+            );
+        } finally {
+            await lockObserver.forceStop();
+        }
+    }
+
     it(
         "should continue pending permission request after resume",
         { timeout: TEST_TIMEOUT_MS },
@@ -223,7 +273,7 @@ describe("Pending work resume", async () => {
                 await permissionRequestedP;
                 expect(initialRequest.kind).toBe("custom-tool");
 
-                await suspendedClient.forceStop();
+                await forceStopAfterSessionLockObserved(suspendedClient, sessionId);
 
                 const resumedTcpClient = createConnectingClient(cliUrl);
                 const session2 = await resumedTcpClient.resumeSession(sessionId, {
@@ -301,7 +351,7 @@ describe("Pending work resume", async () => {
                     )
                 ).toBe("beta");
 
-                await suspendedClient.forceStop();
+                await forceStopAfterSessionLockObserved(suspendedClient, sessionId);
 
                 const resumedClient = createConnectingClient(cliUrl);
                 const session2 = await resumedClient.resumeSession(sessionId, {
@@ -380,7 +430,7 @@ describe("Pending work resume", async () => {
                 expect(await originalToolAStarted.promise).toBe("alpha");
                 expect(await originalToolBStarted.promise).toBe("beta");
 
-                await suspendedClient.forceStop();
+                await forceStopAfterSessionLockObserved(suspendedClient, sessionId);
 
                 const resumedClient = createConnectingClient(cliUrl);
                 const session2 = await resumedClient.resumeSession(sessionId, {
@@ -410,6 +460,241 @@ describe("Pending work resume", async () => {
                     releaseOriginalToolB.resolve("ORIGINAL_B_SHOULD_NOT_WIN");
                 }
             }
+        }
+    );
+
+    it(
+        "should preserve a completed sibling's result on cold resume",
+        { timeout: TEST_TIMEOUT_MS },
+        async () => {
+            const toolBStarted = deferred<string>();
+            const releaseToolB = deferred<string>();
+            let toolACalls = 0;
+
+            await openAiEndpoint.updateConfig({
+                filePath: fileURLToPath(
+                    new URL(
+                        "../../../test/snapshots/pending_work_resume/should_preserve_a_completed_siblings_result_on_cold_resume.yaml",
+                        import.meta.url
+                    )
+                ),
+                workDir,
+            });
+            const server = createTcpServer();
+            await server.start();
+            const cliUrl = getCliUrl(server);
+
+            const originalClient = createConnectingClient(cliUrl);
+            const tools = [
+                defineTool("pending_lookup_a", {
+                    description: "Looks up the first value after resumption",
+                    parameters: z.object({ value: z.string() }),
+                    handler: ({ value }) => {
+                        toolACalls++;
+                        return `PARALLEL_A_${value.toUpperCase()}`;
+                    },
+                }),
+                defineTool("pending_lookup_b", {
+                    description: "Looks up the second value after resumption",
+                    parameters: z.object({ value: z.string() }),
+                    handler: async ({ value }) => {
+                        toolBStarted.resolve(value);
+                        return await releaseToolB.promise;
+                    },
+                }),
+            ];
+            const session1 = await originalClient.createSession({
+                tools,
+                onPermissionRequest: approveAll,
+            });
+            const sessionId = session1.sessionId;
+            const toolRequestsP = waitForExternalToolRequests(session1, [
+                "pending_lookup_a",
+                "pending_lookup_b",
+            ]);
+
+            await session1.send({
+                prompt: "Call pending_lookup_a with value 'alpha' and pending_lookup_b with value 'beta', then reply with both results.",
+            });
+
+            const requests = await toolRequestsP;
+            expect(
+                await waitWithTimeout(toolBStarted.promise, PENDING_WORK_TIMEOUT_MS, "toolBStarted")
+            ).toBe("beta");
+            const toolA = requests["pending_lookup_a"];
+            const toolB = requests["pending_lookup_b"];
+            await waitForCondition(
+                async () =>
+                    (await session1.getEvents()).some(
+                        (event) =>
+                            event.type === "external_tool.completed" &&
+                            event.data.requestId === toolA.data.requestId
+                    ),
+                {
+                    timeoutMs: PENDING_WORK_TIMEOUT_MS,
+                    timeoutMessage: "Timed out waiting for tool A's external completion",
+                }
+            );
+            await waitForCondition(
+                async () =>
+                    (await session1.getEvents()).some(
+                        (event) =>
+                            event.type === "tool.execution_complete" &&
+                            event.data.toolCallId === toolA.data.toolCallId
+                    ),
+                {
+                    timeoutMs: PENDING_WORK_TIMEOUT_MS,
+                    timeoutMessage: "Tool A completed, but its result was not persisted before B",
+                }
+            );
+
+            const beforeResume = await session1.getEvents();
+            expect(toolACalls).toBe(1);
+            expect(
+                beforeResume.find(
+                    (event) =>
+                        event.type === "tool.execution_complete" &&
+                        event.data.toolCallId === toolA.data.toolCallId
+                )
+            ).toMatchObject({
+                data: { success: true, result: { content: "PARALLEL_A_ALPHA" } },
+            });
+            expect(
+                beforeResume
+                    .filter(
+                        (
+                            event
+                        ): event is Extract<SessionEvent, { type: "tool.execution_complete" }> =>
+                            event.type === "tool.execution_complete" &&
+                            [toolA.data.toolCallId, toolB.data.toolCallId].includes(
+                                event.data.toolCallId
+                            )
+                    )
+                    .map((event) => event.data.toolCallId)
+            ).toEqual([toolA.data.toolCallId]);
+
+            const eventsPath = join(env.COPILOT_HOME, "session-state", sessionId, "events.jsonl");
+            const readPersistedEvents = (): SessionEvent[] => {
+                if (!existsSync(eventsPath)) return [];
+                const content = readFileSync(eventsPath, "utf8");
+                const lastCompleteLine = content.lastIndexOf("\n");
+                if (lastCompleteLine < 0) return [];
+                return content
+                    .slice(0, lastCompleteLine)
+                    .split("\n")
+                    .filter(Boolean)
+                    .map((line) => JSON.parse(line) as SessionEvent);
+            };
+            await waitForCondition(
+                () =>
+                    readPersistedEvents().some(
+                        (event) =>
+                            event.type === "tool.execution_complete" &&
+                            event.data.toolCallId === toolA.data.toolCallId &&
+                            event.data.success &&
+                            event.data.result?.content === "PARALLEL_A_ALPHA"
+                    ),
+                {
+                    timeoutMs: PENDING_WORK_TIMEOUT_MS,
+                    timeoutMessage: "Tool A's result was not flushed to events.jsonl before B",
+                }
+            );
+            expect(
+                readPersistedEvents().filter(
+                    (event) =>
+                        event.type === "tool.execution_complete" &&
+                        event.data.toolCallId === toolB.data.toolCallId
+                )
+            ).toHaveLength(0);
+
+            const lockObserver = new CopilotClient({
+                workingDirectory: workDir,
+                env,
+                gitHubToken: DEFAULT_GITHUB_TOKEN,
+                connection: RuntimeConnection.forStdio({ path: process.env.COPILOT_CLI_PATH }),
+            });
+            try {
+                await lockObserver.start();
+                await waitForCondition(
+                    async () =>
+                        (
+                            await lockObserver.rpc.sessions.checkInUse({
+                                sessionIds: [sessionId],
+                            })
+                        ).inUse.includes(sessionId),
+                    {
+                        timeoutMs: PENDING_WORK_TIMEOUT_MS,
+                        timeoutMessage: `Timed out waiting for session '${sessionId}' to acquire its lock.`,
+                    }
+                );
+                await server.forceStop();
+                await originalClient.forceStop();
+                await waitForCondition(
+                    async () =>
+                        !(
+                            await lockObserver.rpc.sessions.checkInUse({
+                                sessionIds: [sessionId],
+                            })
+                        ).inUse.includes(sessionId),
+                    {
+                        timeoutMs: PENDING_WORK_TIMEOUT_MS,
+                        timeoutMessage: `Timed out waiting for session '${sessionId}' to release its lock.`,
+                    }
+                );
+            } finally {
+                await lockObserver.forceStop();
+            }
+
+            const restartedServer = createTcpServer();
+            await restartedServer.start();
+            const resumedClient = createConnectingClient(getCliUrl(restartedServer));
+            const session2 = await resumedClient.resumeSession(sessionId, {
+                continuePendingWork: false,
+                tools,
+                onPermissionRequest: approveAll,
+            });
+            const events = await session2.getEvents();
+            expect(events.find((event) => event.type === "session.resume")).toMatchObject({
+                data: { continuePendingWork: false, sessionWasActive: false },
+            });
+            expect(
+                events.filter(
+                    (event) =>
+                        event.type === "external_tool.completed" &&
+                        event.data.requestId === toolA.data.requestId
+                )
+            ).toHaveLength(1);
+            expect(
+                events.filter(
+                    (event) =>
+                        event.type === "tool.execution_complete" &&
+                        event.data.toolCallId === toolA.data.toolCallId
+                )
+            ).toHaveLength(1);
+            expect(
+                events.filter(
+                    (event) =>
+                        event.type === "tool.execution_complete" &&
+                        event.data.toolCallId === toolB.data.toolCallId
+                )
+            ).toHaveLength(0);
+            for (const request of [toolA, toolB]) {
+                expect(
+                    (
+                        await session2.rpc.tools.handlePendingToolCall({
+                            requestId: request.data.requestId,
+                            result: "LATE_RESULT",
+                        })
+                    ).success
+                ).toBe(false);
+            }
+            expect(toolACalls).toBe(1);
+            const followUp = await session2.sendAndWait({
+                prompt: "Use the completed lookup result and report it without re-running pending_lookup_a. Reply with exactly: COLD_RESUMED_A_RETAINED",
+            });
+            expect(followUp?.data.content).toContain("COLD_RESUMED_A_RETAINED");
+            expect(toolACalls).toBe(1);
+            await session2.disconnect();
         }
     );
 
@@ -516,7 +801,7 @@ describe("Pending work resume", async () => {
                         )
                     ).toBe("beta");
 
-                    if (scenario.disconnectOriginalClient) {
+                    if (!scenario.disconnectOriginalClient) {
                         const lockObserver = new CopilotClient({
                             workingDirectory: workDir,
                             env,
@@ -539,24 +824,13 @@ describe("Pending work resume", async () => {
                                     timeoutMessage: `Timed out waiting for session '${sessionId}' to acquire its lock.`,
                                 }
                             );
-
-                            await suspendedClient.forceStop();
-
-                            await waitForCondition(
-                                async () => {
-                                    const result = await lockObserver.rpc.sessions.checkInUse({
-                                        sessionIds: [sessionId],
-                                    });
-                                    return !result.inUse.includes(sessionId);
-                                },
-                                {
-                                    timeoutMs: PENDING_WORK_TIMEOUT_MS,
-                                    timeoutMessage: `Timed out waiting for session '${sessionId}' to release its lock.`,
-                                }
-                            );
                         } finally {
                             await lockObserver.forceStop();
                         }
+                    }
+
+                    if (scenario.disconnectOriginalClient) {
+                        await forceStopAfterSessionLockObserved(suspendedClient, sessionId);
                     }
 
                     const resumedClient = createConnectingClient(cliUrl);

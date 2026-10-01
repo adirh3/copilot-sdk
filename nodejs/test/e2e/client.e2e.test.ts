@@ -1,7 +1,8 @@
 import { ChildProcess } from "child_process";
+import type { Socket } from "node:net";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { approveAll, CopilotClient, RuntimeConnection } from "../../src/index.js";
-import { isInProcessTransport } from "./harness/sdkTestContext.js";
+import { createSdkTestContext, isInProcessTransport } from "./harness/sdkTestContext.js";
 
 function onTestFinishedStop(client: CopilotClient) {
     onTestFinished(async () => {
@@ -87,25 +88,82 @@ describe("Client", () => {
             // because the JSON-RPC logic is still trying to write to stdin after
             // the process has exited.
             const client = new CopilotClient({ connection: RuntimeConnection.forTcp() });
+            let phase = "createSession";
+            const startedAt = Date.now();
+            let phaseStartedAt = startedAt;
+            const phaseTimes = ["createSession=0ms"];
+            let stopSocket: Socket | null = null;
+            let stopProcess: ChildProcess | null = null;
+            const logPendingPhase = (reason: string) => {
+                const status = client as unknown as {
+                    state: string;
+                    connectionClosed: boolean;
+                    connection: unknown;
+                    socket: Socket | null;
+                    cliProcess: ChildProcess | null;
+                };
+                const socket = stopSocket ?? status.socket;
+                const child = stopProcess ?? status.cliProcess;
+                console.warn(
+                    `${reason}: phase=${phase} for ${Date.now() - phaseStartedAt}ms, ` +
+                        `phases=${phaseTimes.join(", ")}, state=${status.state}, ` +
+                        `connectionClosed=${status.connectionClosed}, connectionActive=${status.connection !== null}, ` +
+                        `child exitCode=${child?.exitCode}, signalCode=${child?.signalCode}, ` +
+                        `socket destroyed=${socket?.destroyed}, readyState=${socket?.readyState}`
+                );
+            };
+            let diagnosticTimer = setTimeout(() => logPendingPhase("Still waiting"), 20_000);
+            const startPhase = (nextPhase: string) => {
+                clearTimeout(diagnosticTimer);
+                phase = nextPhase;
+                phaseStartedAt = Date.now();
+                phaseTimes.push(`${phase}=${phaseStartedAt - startedAt}ms`);
+                diagnosticTimer = setTimeout(() => logPendingPhase("Still waiting"), 20_000);
+            };
+            let completed = false;
+            onTestFinished(async () => {
+                clearTimeout(diagnosticTimer);
+                if (!completed) logPendingPhase("Test ended before completion");
+                await client.forceStop();
+            });
 
             await client.createSession({ onPermissionRequest: approveAll });
 
-            // Kill the server processto force cleanup to fail
+            startPhase("child exit");
+            // Kill the server process to force cleanup to fail
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const cliProcess = (client as any).cliProcess as ChildProcess;
             expect(cliProcess).toBeDefined();
-            cliProcess.kill("SIGKILL");
+            expect(cliProcess.kill("SIGKILL")).toBe(true);
             await vi.waitFor(
                 () => {
-                    expect((client as unknown as { state: string }).state).toBe("disconnected");
+                    const socket = (
+                        client as unknown as {
+                            socket: { destroyed: boolean; readyState: string } | null;
+                        }
+                    ).socket;
+                    expect(
+                        (client as unknown as { state: string }).state,
+                        `After SIGKILL: child exitCode=${cliProcess.exitCode}, signalCode=${cliProcess.signalCode}, ` +
+                            `socket destroyed=${socket?.destroyed}, readyState=${socket?.readyState}`
+                    ).toBe("disconnected");
                 },
                 { timeout: 10_000 }
             );
 
+            stopSocket = (client as unknown as { socket: Socket | null }).socket;
+            stopProcess = cliProcess;
+            phaseTimes.push(
+                `socketAtStop=${stopSocket?.readyState}/${stopSocket?.destroyed}, ` +
+                    `childAtStop=${cliProcess.exitCode}/${cliProcess.signalCode}`
+            );
+            startPhase("client.stop()");
             const errors = await client.stop();
+            clearTimeout(diagnosticTimer);
             if (errors.length > 0) {
                 expect(errors[0].message).toContain("Failed to disconnect session");
             }
+            completed = true;
         },
         // Generous timeout: client.stop() must wait for session.detach to time out
         // when the server process is dead. The default 30s can flake on slow CI under load.
@@ -157,31 +215,25 @@ describe("Client", () => {
         await client.stop();
     });
 
-    it("should list models when authenticated", async () => {
-        const client = new CopilotClient();
-        onTestFinishedStop(client);
+    describe("model catalog", async () => {
+        const { copilotClient: client } = await createSdkTestContext();
 
-        await client.start();
+        it("should list models when authenticated", async () => {
+            await client.start();
 
-        const authStatus = await client.getAuthStatus();
-        if (!authStatus.isAuthenticated) {
-            // Skip if not authenticated - models.list requires auth
-            await client.stop();
-            return;
-        }
+            const authStatus = await client.getAuthStatus();
+            expect(authStatus.isAuthenticated).toBe(true);
 
-        const models = await client.listModels();
-        expect(Array.isArray(models)).toBe(true);
-        if (models.length > 0) {
+            const models = await client.listModels();
+            expect(Array.isArray(models)).toBe(true);
+            expect(models.length).toBeGreaterThan(0);
             const model = models[0];
             expect(model.id).toBeDefined();
             expect(model.name).toBeDefined();
             expect(model.capabilities).toBeDefined();
             expect(model.capabilities.supports).toBeDefined();
             expect(model.capabilities.limits).toBeDefined();
-        }
-
-        await client.stop();
+        });
     });
 
     it.skipIf(isInProcessTransport)("should report error when CLI fails to start", async () => {

@@ -2,6 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
+import net from "net";
 import tls from "tls";
 
 import forge from "node-forge";
@@ -35,6 +36,7 @@ export function generateCA(): CaData {
   cert.setExtensions([
     { name: "basicConstraints", cA: true, critical: true },
     { name: "keyUsage", keyCertSign: true, cRLSign: true, critical: true },
+    { name: "subjectKeyIdentifier" },
   ]);
 
   cert.sign(keys.privateKey, forge.md.sha256.create());
@@ -47,10 +49,34 @@ export function generateCA(): CaData {
   };
 }
 
+export interface IdentityData {
+  certPem: string;
+  keyPem: string;
+}
+
 export function createSecureContextForHost(
   hostname: string,
   ca: CaData,
 ): tls.SecureContext {
+  const identity = createIdentityForHost(hostname, ca);
+  return tls.createSecureContext({
+    key: identity.keyPem,
+    cert: identity.certPem,
+    ca: ca.certPem,
+  });
+}
+
+/**
+ * Issues a CA-signed server identity for `hostname`. IP literals get an IP
+ * subjectAltName rather than a DNS one, because verifiers reject a DNS name
+ * when the client connected to an address; `serverAuth` and modern key-usage
+ * extensions keep strict platform verifiers (macOS SecTrust) from rejecting
+ * the chain outright.
+ */
+export function createIdentityForHost(
+  hostname: string,
+  ca: CaData,
+): IdentityData {
   const keys = forge.pki.rsa.generateKeyPair(2048);
   const cert = forge.pki.createCertificate();
   cert.publicKey = keys.publicKey;
@@ -65,17 +91,31 @@ export function createSecureContextForHost(
   cert.setSubject([{ name: "commonName", value: hostname }]);
   cert.setIssuer(ca.caCert.subject.attributes);
   cert.setExtensions([
+    { name: "basicConstraints", cA: false, critical: true },
+    {
+      name: "keyUsage",
+      digitalSignature: true,
+      keyEncipherment: true,
+      critical: true,
+    },
+    { name: "extKeyUsage", serverAuth: true },
     {
       name: "subjectAltName",
-      altNames: [{ type: 2, value: hostname }],
+      altNames: net.isIP(hostname)
+        ? [{ type: 7, ip: hostname }]
+        : [{ type: 2, value: hostname }],
     },
+    {
+      name: "authorityKeyIdentifier",
+      keyIdentifier: ca.caCert.generateSubjectKeyIdentifier().getBytes(),
+    },
+    { name: "subjectKeyIdentifier" },
   ]);
 
   cert.sign(ca.caKey, forge.md.sha256.create());
 
-  return tls.createSecureContext({
-    key: forge.pki.privateKeyToPem(keys.privateKey),
-    cert: forge.pki.certificateToPem(cert),
-    ca: ca.certPem,
-  });
+  return {
+    keyPem: forge.pki.privateKeyToPem(keys.privateKey),
+    certPem: forge.pki.certificateToPem(cert),
+  };
 }

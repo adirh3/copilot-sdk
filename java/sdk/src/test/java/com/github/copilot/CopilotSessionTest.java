@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -146,7 +147,7 @@ public class CopilotSessionTest {
             CopilotSession session = client
                     .createSession(new SessionConfig().setOnPermissionRequest(PermissionHandler.APPROVE_ALL)).get();
 
-            List<SessionEvent> receivedEvents = new ArrayList<>();
+            List<SessionEvent> receivedEvents = new CopyOnWriteArrayList<>();
             CompletableFuture<Void> idleReceived = new CompletableFuture<>();
 
             session.on(evt -> {
@@ -240,10 +241,18 @@ public class CopilotSessionTest {
                     .createSession(new SessionConfig().setOnPermissionRequest(PermissionHandler.APPROVE_ALL)).get();
 
             var events = new ArrayList<String>();
-            session.on(evt -> events.add(evt.getType()));
+            var idleReceived = new CompletableFuture<Void>();
+            session.on(evt -> {
+                events.add(evt.getType());
+                if (evt instanceof SessionIdleEvent) {
+                    idleReceived.complete(null);
+                }
+            });
 
             // Use String convenience overload (covers sendAndWait(String) path)
             AssistantMessageEvent response = session.sendAndWait("What is 2+2?").get(60, TimeUnit.SECONDS);
+            // Await this listener, not just sendAndWait's internal idle listener.
+            idleReceived.get(60, TimeUnit.SECONDS);
 
             assertNotNull(response);
             assertEquals("assistant.message", response.getType());

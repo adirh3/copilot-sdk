@@ -74,7 +74,7 @@ public record SessionOptionsUpdateParams(
     @JsonProperty("shellProcessFlags") List<String> shellProcessFlags,
     /** Resolved sandbox configuration. */
     @JsonProperty("sandboxConfig") SandboxConfig sandboxConfig,
-    /** Origin of the sandbox choice. The runtime uses this only for internal telemetry provenance; managed policy is derived independently. */
+    /** Origin of the sandbox choice. Settings-derived origins (never_configured, user_enabled, user_disabled, repository_policy) let managed policy floor a host preference; explicit below-floor changes remain policy conflicts unless a session opt-out is authorized. Also used for telemetry provenance. */
     @JsonProperty("sandboxConfigSource") SandboxConfigSource sandboxConfigSource,
     /** Whether interactive shell sessions are logged. */
     @JsonProperty("logInteractiveShells") Boolean logInteractiveShells,
@@ -84,6 +84,8 @@ public record SessionOptionsUpdateParams(
     @JsonProperty("allowAllMcpServerInstructions") Boolean allowAllMcpServerInstructions,
     /** Additional directories to search for skills. */
     @JsonProperty("skillDirectories") List<String> skillDirectories,
+    /** Skill scan directories and descendants excluded from discovery. Supports `~`-relative paths. */
+    @JsonProperty("ignoredSkillsLocations") List<String> ignoredSkillsLocations,
     /** Built-in skill names to include in this session. When specified, only these runtime-bundled skills are available. Skills from other sources with the same name remain available. Set to null to remove the allowlist restriction. */
     @JsonProperty("includedBuiltinSkills") List<String> includedBuiltinSkills,
     /** Skill IDs that should be excluded from this session. */

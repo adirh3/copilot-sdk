@@ -1,0 +1,13 @@
+# SDK targets are local even when a host dependency pins another SDK source.
+# Maintained by bazel/3rdparty/postprocess-local-crates.mjs.
+load("//src/sdk/rust:sdk_targets.bzl", "sdk_targets")
+
+package(default_visibility = ["//visibility:public"])
+
+alias(
+    name = "github_copilot_sdk",
+    actual = ":github-copilot-sdk-local-runtime",
+    tags = ["manual"],
+)
+
+sdk_targets()

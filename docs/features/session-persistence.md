@@ -131,6 +131,30 @@ await session.SendAndWaitAsync(new MessageOptions { Prompt = "Analyze my codebas
 
 Later—minutes, hours, or even days—you can resume the session from where you left off.
 
+### Transcript recovery
+
+The resume option `allowTranscriptRecovery` controls recovery when the runtime loads a
+transcript from storage. It defaults to `true` in all modes. With `false`, a load that
+would discard damaged records or move `session.start` fails with JSON-RPC error `-32075`
+without rewriting the transcript. An intact final record without a newline is accepted.
+
+Records skipped for forward compatibility still count when checking persisted order.
+If such records precede `session.start`, recovery must move the start record ahead of
+them. A transcript containing only skipped records is not empty and cannot be recovered
+without a valid `session.start`.
+
+When recovery is allowed, the returned session exposes `transcriptRecovery`, including
+the invalid line numbers, whether `session.start` moved, and a planned byte-exact backup
+path. Loading alone does not write that backup; the next durable append performs the
+repair and backup.
+
+> [!NOTE]
+> This option applies to a new transcript load, not to the lifetime of a session.
+> Reconnecting to a session already resident in the runtime reuses its live history
+> without revalidating storage or rejecting recovery authorized by an earlier resume.
+> The recovery report describes the load that performed recovery, not every subsequent
+> reconnect.
+
 ```mermaid
 flowchart LR
     subgraph Day1["Day 1"]

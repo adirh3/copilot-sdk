@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { approveAll } from "../../src/index.js";
 import { createSdkTestContext } from "./harness/sdkTestContext.js";
+import { retry } from "./harness/sdkTestHelper.js";
 
 const FILE_NAME = "rewind-sdk.txt";
 const ORIGINAL_FILE_CONTENT = "Original rewind content";
@@ -36,6 +37,18 @@ describe("Rewind", async () => {
         });
 
         try {
+            await retry(
+                "initialize rewind file-change tracking",
+                async () => {
+                    const initial = await session.rpc.history.listRewindPoints();
+                    expect(initial.unavailableReason).toBeUndefined();
+                    expect(initial.fileChangeTrackingEnabled).toBe(true);
+                    expect(initial.points).toHaveLength(0);
+                },
+                300,
+                100
+            );
+
             const ready = await session.sendAndWait({
                 prompt: `Use the edit tool to replace the exact contents of ${FILE_NAME} from ${ORIGINAL_FILE_CONTENT} to ${PREPARED_FILE_CONTENT}. After the tool succeeds, reply with exactly SDK_REWIND_READY.`,
             });

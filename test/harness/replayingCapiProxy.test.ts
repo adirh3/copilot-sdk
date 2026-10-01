@@ -81,6 +81,34 @@ describe("ReplayingCapiProxy", () => {
     return yaml.parse(content) as NormalizedData;
   }
 
+  test("validates registered GitHub identities before replay configuration", async () => {
+    const proxy = new ReplayingCapiProxy("http://localhost");
+    proxy.setCopilotUserByToken("owner-token", { login: "owner", id: 42 });
+    proxy.setCopilotUserByToken("other-token", { login: "other", id: 99 });
+    proxy.setCopilotUserByToken("unresolved-token", { login: "unresolved" });
+    const address = await proxy.start();
+    try {
+      for (const [token, id, login] of [
+        ["owner-token", 42, "owner"],
+        ["other-token", 99, "other"],
+      ] as const) {
+        const response = await fetch(`${address}/user`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ id, login, type: "User" });
+      }
+      for (const token of ["unknown-token", "unresolved-token"]) {
+        const response = await fetch(`${address}/user`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(response.status).toBe(401);
+      }
+    } finally {
+      await proxy.stop();
+    }
+  });
+
   test("does not write file when no chat completion exchanges", async () => {
     const outputPath = path.join(tempDir, "output.yaml");
     const proxy = new ReplayingCapiProxy(
@@ -704,6 +732,53 @@ Always include PINEAPPLE_COCONUT_42.
     expect(toolMessage?.content).toBe(
       "Agent completed. agent_id: read-file, agent_type: explore, status: completed, description: Reading subagent-test.txt, elapsed: 0s, total_turns: 0, duration: 0s\n\nDone.",
     );
+  });
+
+  test("names runtime agent IDs that no task call introduced", async () => {
+    const runtimeAgentId = "3e0c7565-6091-58cb-85bb-6cb14db23ef7";
+    const agentResult = (agentId: string) =>
+      `Agent completed. agent_id: ${agentId}, agent_type: general-purpose, status: completed, description: Probe, elapsed: 0s, total_turns: 0, duration: 0s\n\nDone.`;
+    const requestBody = JSON.stringify({
+      messages: [
+        { role: "user", content: "Check the agent" },
+        {
+          role: "assistant",
+          tool_calls: [
+            {
+              id: "tc1",
+              type: "function",
+              function: {
+                name: "read_agent",
+                arguments: JSON.stringify({
+                  agent_id: runtimeAgentId,
+                  since_turn: 0,
+                }),
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "tc1",
+          content: agentResult(runtimeAgentId),
+        },
+      ],
+    });
+    const responseBody = JSON.stringify({
+      choices: [{ message: { role: "assistant", content: "Done" } }],
+    });
+
+    const outputPath = await createProxy([
+      { url: "/chat/completions", requestBody, responseBody },
+    ]);
+
+    const result = await readYamlOutput(outputPath);
+    const [, readCall, readResult] = result.conversations[0].messages;
+    expect(JSON.parse(readCall.tool_calls![0].function!.arguments!)).toEqual({
+      agent_id: "api-agent",
+      since_turn: 0,
+    });
+    expect(readResult.content).toBe(agentResult("api-agent"));
   });
 
   test("normalizes GitHub CLI proxy auth failures", async () => {
@@ -1632,6 +1707,94 @@ Always include PINEAPPLE_COCONUT_42.
       }
     });
 
+    test("replays reads of an agent no task call started with its runtime ID", async () => {
+      const cachePath = path.join(tempDir, "cache.yaml");
+      const agentResult = (agentId: string) =>
+        `Agent completed. agent_id: ${agentId}, agent_type: general-purpose, status: completed, description: Probe, elapsed: 0s, total_turns: 0, duration: 0s\n\nDone.`;
+      const readCall = (id: string, agentId: string) => ({
+        role: "assistant" as const,
+        tool_calls: [
+          {
+            id,
+            type: "function" as const,
+            function: {
+              name: "read_agent",
+              arguments: JSON.stringify({ agent_id: agentId, since_turn: 0 }),
+            },
+          },
+        ],
+      });
+      const cacheContent = yaml.stringify({
+        models: ["test-model"],
+        conversations: [
+          {
+            messages: [
+              { role: "system", content: "${system}" },
+              { role: "user", content: "Check the agent" },
+              readCall("toolcall_0", "api-agent"),
+              {
+                role: "tool",
+                tool_call_id: "toolcall_0",
+                content: agentResult("api-agent"),
+              },
+              {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: "toolcall_1",
+                    type: "function",
+                    function: {
+                      name: "write_agent",
+                      arguments: '{"agent_id":"api-agent","message":"Continue"}',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      } satisfies NormalizedData);
+      await writeFile(cachePath, cacheContent);
+
+      const proxy = new ReplayingCapiProxy(
+        "http://localhost:9999",
+        cachePath,
+        workDir,
+      );
+      const proxyUrl = await proxy.start();
+      // A different ID than any recording saw, as each run generates its own.
+      const runtimeAgentId = "8d0a3f62-1b4e-4c9a-9f57-2e6b0c1d7a45";
+
+      try {
+        const response = await makeRequest(proxyUrl, "/chat/completions", {
+          body: {
+            model: "test-model",
+            messages: [
+              { role: "system", content: "Be helpful" },
+              { role: "user", content: "Check the agent" },
+              readCall("runtime-call-id", runtimeAgentId),
+              {
+                role: "tool",
+                tool_call_id: "runtime-call-id",
+                content: agentResult(runtimeAgentId),
+              },
+            ],
+          },
+        });
+
+        expect(response.status).toBe(200);
+        const parsed = JSON.parse(response.body) as ChatCompletion;
+        const toolCall = parsed.choices[0].message
+          .tool_calls![0] as ChatCompletionMessageFunctionToolCall;
+        expect(JSON.parse(toolCall.function.arguments)).toEqual({
+          agent_id: runtimeAgentId,
+          message: "Continue",
+        });
+      } finally {
+        await proxy.stop();
+      }
+    });
+
     test("matches parallel tool results regardless of arrival order", async () => {
       const cachePath = path.join(tempDir, "cache.yaml");
       const cacheContent = yaml.stringify({
@@ -1729,6 +1892,53 @@ Always include PINEAPPLE_COCONUT_42.
           (JSON.parse(response.body) as ChatCompletion).choices[0].message
             .content,
         ).toBe("Paris is in France.");
+      } finally {
+        await proxy.stop();
+      }
+    });
+
+    test("streaming preserves tool choices from recorded multi-client traffic", async () => {
+      const proxy = new ReplayingCapiProxy("http://localhost:9999");
+      await proxy.updateConfig({
+        filePath: path.resolve(
+          __dirname,
+          "../snapshots/multi_client/both_clients_see_tool_request_and_completion_events.yaml",
+        ),
+        workDir,
+        backend: "capi",
+        replayOnly: true,
+      });
+      const proxyUrl = await proxy.start();
+      try {
+        const response = await makeRequest(proxyUrl, "/chat/completions", {
+          body: {
+            model: "claude-sonnet-5",
+            messages: [
+              { role: "system", content: "Application prompt" },
+              {
+                role: "user",
+                content:
+                  "Use the magic_number tool with seed 'hello' and tell me the result",
+              },
+            ],
+            stream: true,
+          },
+        });
+        expect(response.status).toBe(200);
+        const chunks = response.body
+          .split("\n")
+          .filter((line) => line.startsWith("data: {"))
+          .map((line) => JSON.parse(line.slice(6)) as ChatCompletionChunk);
+        const calls = chunks.flatMap(
+          (chunk) => chunk.choices[0].delta.tool_calls ?? [],
+        );
+        expect(calls.map((call) => call.function?.name)).toEqual([
+          "report_intent",
+          "magic_number",
+        ]);
+        expect(calls.map((call) => call.index)).toEqual([0, 1]);
+        expect(JSON.parse(calls[1].function!.arguments!)).toEqual({ seed: "hello" });
+        expect(chunks.at(-1)?.choices[0].finish_reason).toBe("tool_calls");
       } finally {
         await proxy.stop();
       }

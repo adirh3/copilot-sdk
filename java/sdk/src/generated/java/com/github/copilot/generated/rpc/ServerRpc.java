@@ -25,10 +25,16 @@ public final class ServerRpc {
 
     private final RpcCaller caller;
 
+    /** API methods for the {@code environments} namespace. */
+    public final ServerEnvironmentsApi environments;
+    /** API methods for the {@code host} namespace. */
+    public final ServerHostApi host;
     /** API methods for the {@code hooks} namespace. */
     public final ServerHooksApi hooks;
     /** API methods for the {@code models} namespace. */
     public final ServerModelsApi models;
+    /** API methods for the {@code sandbox} namespace. */
+    public final ServerSandboxApi sandbox;
     /** API methods for the {@code tools} namespace. */
     public final ServerToolsApi tools;
     /** API methods for the {@code account} namespace. */
@@ -39,12 +45,12 @@ public final class ServerRpc {
     public final ServerMcpApi mcp;
     /** API methods for the {@code extensions} namespace. */
     public final ServerExtensionsApi extensions;
+    /** API methods for the {@code skills} namespace. */
+    public final ServerSkillsApi skills;
     /** API methods for the {@code catalog} namespace. */
     public final ServerCatalogApi catalog;
     /** API methods for the {@code plugins} namespace. */
     public final ServerPluginsApi plugins;
-    /** API methods for the {@code skills} namespace. */
-    public final ServerSkillsApi skills;
     /** API methods for the {@code agents} namespace. */
     public final ServerAgentsApi agents;
     /** API methods for the {@code instructions} namespace. */
@@ -65,6 +71,8 @@ public final class ServerRpc {
     public final ServerSessionsApi sessions;
     /** API methods for the {@code agentRegistry} namespace. */
     public final ServerAgentRegistryApi agentRegistry;
+    /** API methods for the {@code accounts} namespace. */
+    public final ServerAccountsApi accounts;
 
     /**
      * Creates a new server RPC client.
@@ -73,16 +81,19 @@ public final class ServerRpc {
      */
     public ServerRpc(RpcCaller caller) {
         this.caller = caller;
+        this.environments = new ServerEnvironmentsApi(caller);
+        this.host = new ServerHostApi(caller);
         this.hooks = new ServerHooksApi(caller);
         this.models = new ServerModelsApi(caller);
+        this.sandbox = new ServerSandboxApi(caller);
         this.tools = new ServerToolsApi(caller);
         this.account = new ServerAccountApi(caller);
         this.secrets = new ServerSecretsApi(caller);
         this.mcp = new ServerMcpApi(caller);
         this.extensions = new ServerExtensionsApi(caller);
+        this.skills = new ServerSkillsApi(caller);
         this.catalog = new ServerCatalogApi(caller);
         this.plugins = new ServerPluginsApi(caller);
-        this.skills = new ServerSkillsApi(caller);
         this.agents = new ServerAgentsApi(caller);
         this.instructions = new ServerInstructionsApi(caller);
         this.commands = new ServerCommandsApi(caller);
@@ -93,6 +104,7 @@ public final class ServerRpc {
         this.llmInference = new ServerLlmInferenceApi(caller);
         this.sessions = new ServerSessionsApi(caller);
         this.agentRegistry = new ServerAgentRegistryApi(caller);
+        this.accounts = new ServerAccountsApi(caller);
     }
 
     /**

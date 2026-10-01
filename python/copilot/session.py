@@ -526,6 +526,7 @@ class McpAuthStaticClientConfig(TypedDict, total=False):
     clientSecret: str
     grantType: Literal["client_credentials"]
     publicClient: bool
+    scope: str
 
 
 class McpAuthRequest(TypedDict, total=False):
@@ -1589,6 +1590,15 @@ class _BearerTokenProviderAdapter:
         return ProviderTokenAcquireResult(token=cast(str, result))
 
 
+@dataclass(frozen=True)
+class TranscriptRecoveryReport:
+    """Repair details returned by ``session.resume`` when transcript recovery ran."""
+
+    planned_backup_path: str
+    invalid_line_numbers: list[int]
+    session_start_moved: bool
+
+
 class CopilotSession:
     """
     Represents a single conversation session with the Copilot CLI.
@@ -1641,6 +1651,7 @@ class CopilotSession:
                 creating or resuming the session.
         """
         self.session_id = session_id
+        self.transcript_recovery: TranscriptRecoveryReport | None = None
         self._managed_settings_enabled = managed_settings_enabled
         self._client = client
         self._workspace_path = os.fsdecode(workspace_path) if workspace_path is not None else None
@@ -1867,6 +1878,11 @@ class CopilotSession:
         has finished processing the message.
 
         Events are still delivered to handlers registered via :meth:`on` while waiting.
+        Synchronous handlers registered before this call finish processing the
+        completing root session.idle event before it returns successfully.
+        This does not wait for asynchronous work started by a handler.
+        Sub-agent events with a non-empty ``agent_id`` do not complete the wait
+        or supply its reply.
 
         Args:
             prompt: The message text to send.
@@ -1923,6 +1939,8 @@ class CopilotSession:
 
         def handler(event: SessionEventTypeAlias) -> None:
             nonlocal first_assistant_message_logged, last_assistant_message, error_event
+            if event.agent_id:
+                return
             match event.data:
                 case AssistantMessageData():
                     last_assistant_message = event
@@ -2303,6 +2321,8 @@ class CopilotSession:
                         static_client_config["publicClient"] = (
                             data.static_client_config.public_client
                         )
+                    if data.static_client_config.scope is not None:
+                        static_client_config["scope"] = data.static_client_config.scope
                     request["staticClientConfig"] = static_client_config
                 asyncio.ensure_future(self._execute_mcp_auth_and_respond(request, handler))
 

@@ -1,6 +1,6 @@
 # GitHub Copilot SDK for Java
 
-[![Build](https://github.com/github/copilot-sdk/actions/workflows/java-sdk-tests.yml/badge.svg)](https://github.com/github/copilot-sdk/actions/workflows/java-sdk-tests.yml)
+[![Build](https://github.com/github/copilot-sdk/actions/workflows/sdk.yml/badge.svg)](https://github.com/github/copilot-sdk/actions/workflows/sdk.yml)
 [![Java 17+](https://img.shields.io/badge/Java-17%2B-blue?logo=openjdk&logoColor=white)](https://openjdk.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -121,6 +121,18 @@ client.start().get();
 
 ## Quick Start
 
+For experimental in-process AHP hosting, select a transport explicitly:
+`client.startAhpHost(new AhpHostOptions().setLocalServer(new HostLocalServerOptions(null, null, null, null)))`.
+The transport types are in `com.github.copilot.generated.rpc`. For GitHub Mission
+Control, use `.setGithubEnvironment(new HostGitHubEnvironmentOptions("My host", "compute-id"))`
+instead, or configure both transports. GitHub environment name and compute ID are
+required; there is no implicit local listener. The host's `getUrl()`, `getToken()`,
+and `getPid()` may return `null`; `getEnvironmentId()` returns the GitHub environment
+ID when configured. Environment list/get/delete operations are available only
+through the generated RPC API.
+See [runtime-supervised AHP hosting](../docs/runtime-supervised-host.md) for creation
+and resume callbacks, resident-session publication, ownership, and shared-snapshot E2Es.
+
 ```java
 import com.github.copilot.CopilotClient;
 import com.github.copilot.generated.AssistantMessageEvent;
@@ -183,10 +195,42 @@ connection-level resolver for extension launch profiles. The client installs the
 reverse-RPC handler and registers the provider during startup before sessions can
 be created.
 
+### Installation confirmation (experimental)
+
+`CopilotClientOptions.setInstallationConfirmationHandler(...)` configures the
+connection-global `installations.confirm` receiver. The handler receives the
+generated `InstallationConfirmationRequest` and an
+`InstallationConfirmationContext`, then returns only an explicit
+generated `InstallationDecision.CONFIRM`, `InstallationDecision.DECLINE` or
+`InstallationDecision.CANCEL`. The SDK echoes the original challenge and review
+fingerprint; it never infers approval and does not enable installation
+capabilities or call a runtime registration RPC.
+
+Match `operationId` and `policySessionId` against the original action on this
+exact connection before presenting the complete review. Missing legacy session
+metadata does not select a default session. Refuse unknown operations or
+incomplete reviews.
+
+Concurrent reviews are independent and do not block other client-global RPCs.
+`context.getCancelled()` returns the single cancellation signal for the review.
+It completes when the runtime's numeric `$/cancelRequest`, runtime-enforced
+expiry, or loss of the original connection retires the review. Separately
+spawned UI work should observe this signal and retire itself when it completes.
+Dropping an outbound installation or OAuth future does not cancel that
+operation.
+
 `SessionConfig.setAskUserVariant(AskUserVariant.ELICITATION)` selects the
 structured form-based `ask_user` tool when an elicitation handler is also set.
 The default is `AskUserVariant.LEGACY`. Re-supply the option and handler through
 `ResumeSessionConfig` on a cold resume.
+
+`ResumeSessionConfig.setContinuePendingWork(false)` interrupts work still in
+flight when resuming (the default), while preserving completed tool results
+already durably recorded by the runtime.
+Pass `new ResumeSessionConfig().setContinuePendingWork(true)` to
+`resumeSession` to keep waiting for pending tool calls and permission requests
+instead. Leave the option unset to use the runtime default. Re-register any
+external tools needed to handle continued work.
 
 For rotating per-session GitHub credentials, use
 `SessionConfig.setGitHubTokenProvider(...)` (or the equivalent
@@ -208,6 +252,18 @@ Initial acquisition runs during session creation or resume. Cancellation,
 provider errors, and invalid token responses reject that operation instead of
 falling back to ambient authentication. Idle sessions refresh only before their
 next credential-consuming operation; there is no background refresh timer.
+
+### Typed MCP installation and removal payloads (breaking change)
+
+Three payloads in the experimental MCP installation and removal workflow are now sealed
+interfaces with one record per variant, instead of `Object`, which brings Java into line
+with the other SDKs. No other generated type changes.
+
+| Field | Before | After |
+| --- | --- | --- |
+| `InstallationConfirmationRequest.review()` | `Object` | `InstallationReview` sealed interface (`InstallationReviewMcp` / `InstallationReviewSkill`, by `resource`); the MCP variant carries `McpInstallationReview` (`McpInstallationReviewInstall` / `McpInstallationReviewUninstall`, by `action`) and the Skill variant carries `SkillInstallationReview` |
+| `McpInstallPlan.transportChoices()` | `List<Object>` | `List<McpPlanTransportChoice>` (`McpPlanTransportChoicePackage` / `McpPlanTransportChoiceRemote`, by `installMethod`) |
+| `McpInstallationManagementResultOutcome.getOutcome()` / `setOutcome(...)` | `Object` | `McpInstallationManagementOutcome`, whose operation variant carries `McpInstallationOperationStatus` (by `phase`) |
 
 ## Message source
 
@@ -234,7 +290,11 @@ system prompt.
 
 Agent sources serialize as `agent-<id>`. Pass the agent ID without adding a
 prefix. The SDK preserves its case and whitespace and rejects null IDs.
-`sendAndWait` accepts the same source values as `send`.
+`sendAndWait` accepts the same source values as `send`. Sub-agent events remain
+visible to listeners but do not complete the wait or supply its reply.
+Synchronous listeners registered before `sendAndWait` finish processing the root
+`session.idle` event before its future completes. Event listeners run in
+registration order.
 
 ## Structured output (experimental)
 
@@ -250,6 +310,17 @@ Inventory inventory = session.sendAndWait(
     Inventory.class
 ).get();
 ```
+
+On resume, transcript recovery defaults to true in all modes.
+Use `ResumeSessionConfig.setAllowTranscriptRecovery(false)` to reject recovery.
+A repaired session exposes
+`getTranscriptRecovery()` (or null), with `plannedBackupPath`,
+`invalidLineNumbers` (including discarded torn-tail lines), and
+`sessionStartMoved`. A rejected resume retains the existing error message;
+`JsonRpcException.getCode()` and `getData()` expose the server's code and
+`invalidLineNumbers` / `sessionStartMoved` data.
+Disabling recovery still permits adding a missing newline after an intact final
+record; it rejects torn tails.
 
 Enable annotation processing with `CopilotResponseProcessor` (automatically
 discoverable alongside the SDK's existing processors), and opt in to experimental
@@ -493,6 +564,69 @@ var resumed = client.resumeSession(sessionId, new ResumeSessionConfig()
 
 When `memory` is left unset, no memory configuration is sent and the runtime default applies. In the default `CopilotClientMode.COPILOT_CLI` the SDK leaves `memory` unset so the runtime applies its own default, while `CopilotClientMode.EMPTY` defaults `memory` to disabled unless you set it explicitly.
 
+## JSON-RPC error handling
+
+Server error responses surface as `com.github.copilot.JsonRpcException`, a
+`RuntimeException` with `getCode()`, `getMessage()`, and `getData()`. The data is a
+Jackson `JsonNode`: objects, arrays, strings, numbers, and booleans retain their
+JSON types, including empty values, zero, and false. Numeric fidelity follows
+Jackson's existing parser. Omitted data returns Java `null`; explicit JSON `null`
+returns a `NullNode` (`data.isNull()` is true).
+
+Future wrapping is unchanged. With `get()`, inspect the cause of
+`ExecutionException`:
+
+```java
+import com.github.copilot.JsonRpcException;
+import java.util.concurrent.ExecutionException;
+
+try {
+    client.ping("hello").get();
+} catch (ExecutionException ex) {
+    if (ex.getCause() instanceof JsonRpcException rpcError) {
+        System.err.println("RPC " + rpcError.getCode() + ": " + rpcError.getMessage());
+        var data = rpcError.getData();
+        if (data != null && !data.isNull()) {
+            // Inspect data according to the server's error contract.
+        }
+    } else {
+        throw ex; // Transport and local failures are not JSON-RPC error responses.
+    }
+}
+```
+
+The enclosing method must handle or declare both `InterruptedException` and the
+rethrown `ExecutionException`.
+With `join()`, the wrapper is `CompletionException` instead:
+
+```java
+import java.util.concurrent.CompletionException;
+
+try {
+    client.ping("hello").join();
+} catch (CompletionException ex) {
+    if (ex.getCause() instanceof JsonRpcException rpcError) {
+        System.err.println("RPC " + rpcError.getCode() + ": " + rpcError.getMessage());
+        var data = rpcError.getData();
+        if (data == null) {
+            // The data member was omitted.
+        } else if (data.isNull()) {
+            // The server explicitly supplied JSON null.
+        } else {
+            // Inspect data according to the server's error contract.
+        }
+    } else {
+        throw ex;
+    }
+}
+```
+
+Error data is not appended to `getMessage()` or `toString()`. Avoid logging it
+indiscriminately: server-provided data may contain sensitive information.
+`getData()` returns the shared Jackson node, not an immutable snapshot. Use
+`deepCopy()` before modifying a container node, particularly when multiple
+observers share the failed future.
+
 ## Using experimental APIs
 
 Some SDK APIs are marked as experimental with `@CopilotExperimental`. These APIs may change or be removed in future versions without notice.
@@ -647,9 +781,9 @@ CI enforces both checks. Spotless runs explicitly in CI; `mvn verify` alone does
 
 #### Development Setup for native embedding
 
-Run native-runtime Maven commands from the `java` directory. Native packaging requires Node.js in addition to JDK 25 and Maven because `copilot-native/scripts/fetch-native.mjs` retrieves the pinned runtime package from the corresponding GitHub release.
+Run native-runtime Maven commands from the `java` directory. Native packaging requires Node.js in addition to JDK 25 and Maven. In a standalone SDK checkout, `copilot-native/scripts/fetch-native.mjs` retrieves the pinned runtime package from the corresponding GitHub release. When the SDK is nested in `copilot-agent-runtime`, it instead stages the same-checkout artifacts from `dist-cli`; run `pnpm run build:cli` from the runtime repository first.
 
-On a native Linux glibc host, Maven activates `native-linux-x64` or `native-linux-arm64` for the matching architecture when `copilot.native.libc=glibc` is set. On a Linux musl x64 host, Maven activates `native-linuxmusl-x64` when `copilot.native.libc=musl` is set. On Windows x64, Windows ARM64, Intel macOS, and Apple Silicon macOS, Maven activates `native-win32-x64`, `native-win32-arm64`, `native-darwin-x64`, or `native-darwin-arm64` automatically. The matching profile validates the host, runs the native script tests, fetches the pinned platform package from the corresponding `github/copilot-cli` release during `generate-resources`, packages the classifier JAR during `package`, and verifies its native contents.
+On a native Linux glibc host, Maven activates `native-linux-x64` or `native-linux-arm64` for the matching architecture when `copilot.native.libc=glibc` is set. On a Linux musl x64 host, Maven activates `native-linuxmusl-x64` when `copilot.native.libc=musl` is set. On Windows x64, Windows ARM64, Intel macOS, and Apple Silicon macOS, Maven activates `native-win32-x64`, `native-win32-arm64`, `native-darwin-x64`, or `native-darwin-arm64` automatically. The matching profile validates the host, runs the native script tests, stages the platform package during `generate-resources`, packages the classifier JAR during `package`, and verifies its native contents.
 
 Before opting in, validate that Node.js reports glibc for the build host:
 
@@ -713,17 +847,18 @@ Each classifier JAR includes `runtime.node`, `platform.properties`, and `copilot
 
 ### Versioning and releases
 
-The Java SDK uses [Maven CI-friendly versions](https://maven.apache.org/maven-ci-friendly.html). Every module declares `<version>${revision}</version>`, and the single source of truth is the `<revision>` property in `java/pom.xml`. The committed value stays a `-SNAPSHOT` (for example `1.0.14-SNAPSHOT`) and is only used for local development and the daily snapshot publish.
+The Java SDK uses [Maven CI-friendly versions](https://maven.apache.org/maven-ci-friendly.html). Every module declares `<version>${revision}</version>`, and the single source of truth is the `<revision>` property in `java/pom.xml`. The committed value stays a `-SNAPSHOT` for local development. Published artifacts contain a concrete version rather than the unresolved `${revision}` property.
 
-Releasing is intentionally a **read-only** operation that never mutates the repository:
+Stable, prerelease, and public unstable releases include all six SDKs. SDK and runtime versions are numbered independently; each Java release contains the matching runtime artifacts in its native classifier JARs. Public unstable versions use `X.Y.Z-unstable.<run-id>.g<sha>`. Maven `-SNAPSHOT` builds are a separate development channel.
 
-- The release version is computed by the shared release pipeline (`.github/workflows/publish.yml`) — the same version used by every other language SDK — and injected at build time with `-Drevision=X.Y.Z`. The POM is **not** edited or committed.
-- `.github/workflows/java-publish-maven.yml` builds every native classifier and the primary artifact from a single immutable source commit and publishes to Maven Central. It creates no commits, no branch-protection bypass, and requires no elevated repository token.
-- The `java/vX.Y.Z` traceability tag and the cross-language `vX.Y.Z` GitHub Release are created by `publish.yml` **after** publication succeeds, pointing at the original release commit.
+Release artifacts and source references are public:
 
-For an independent Java publication retry, dispatch `java-publish-maven.yml` from `main` with the original `releaseVersion` and full `sourceSha`. The source must be a commit already in `main`'s history. Unmerged commits, branch names, and tag names are rejected before builds run.
+- Java packages are available from Maven Central.
+- The `java/v<SDK-version>` and `v<SDK-version>` tags identify the corresponding public SDK source snapshot in [`github/copilot-sdk`](https://github.com/github/copilot-sdk).
+- Stable/prerelease versions also have a combined `v<SDK-version>` [GitHub release](https://github.com/github/copilot-sdk/releases) and versioned Java documentation. Prerelease documentation does not replace the latest documentation.
+- Unstable releases create source tags without advancing SDK `main`, creating an SDK GitHub release announcement, or deploying Java documentation. Their runtime assets are available in the separate `runtime-<runtime-version>` release.
 
-Because there is no `maven-release-plugin` and no `release:prepare` ceremony, the POM deliberately does not track the "next" release version. To validate a build with an explicit version locally, without publishing:
+To validate a build with an explicit version locally, without changing the checked-in POM or publishing:
 
 ```bash
 # Build and verify with an explicit version, without touching the POM
@@ -735,7 +870,7 @@ cat sdk/.flattened-pom.xml copilot-native/.flattened-pom.xml
 
 These commands do not upload artifacts. Do not use `deploy` for local validation: the Central publishing plugin is configured with `autoPublish=true`.
 
-`flatten-maven-plugin` (ossrh mode) resolves `${revision}` into the installed and published POMs, so downstream consumers never see the unresolved property. Documentation version references are updated through a normal reviewed pull request (see `scripts/update-documentation-versions.sh`), not as a side effect of publishing.
+`flatten-maven-plugin` (ossrh mode) resolves `${revision}` into the installed and published POMs. Documentation version references are updated through a normal reviewed pull request (see `scripts/update-documentation-versions.sh`), not as a side effect of publishing.
 
 ## License
 

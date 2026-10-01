@@ -10,6 +10,8 @@
 import type { Canvas } from "./canvas.js";
 import type { SessionFsProvider } from "./sessionFsProvider.js";
 import type { CopilotRequestHandler } from "./copilotRequestHandler.js";
+import type { InstallationConfirmationHandler } from "./installationConfirmation.js";
+export type { InstallationConfirmationHandler } from "./installationConfirmation.js";
 import type {
     AttachmentExtensionContext as GeneratedExtensionContextAttachment,
     AutoTier,
@@ -21,13 +23,14 @@ import type {
     SessionEvent as GeneratedSessionEvent,
 } from "./generated/session-events.js";
 import type { CopilotSession } from "./session.js";
-import type { FactoryJsonSchema, JsonValue } from "./factory.js";
+import type { JsonValue } from "./workflow.js";
 import type {
     ExtensionLaunchProviderHandler as GeneratedExtensionLaunchProvider,
     GitHubTokenAcquireRequest,
     GitHubTokenAcquireResult,
     GitHubTelemetryNotification,
     ModelBillingTokenPrices,
+    DiagnosticsConfiguration,
     OpenCanvasInstance,
     RemoteSessionMode,
     CurrentToolMetadata,
@@ -35,7 +38,26 @@ import type {
 import type { ToolSet } from "./toolSet.js";
 export type { RemoteSessionMode } from "./generated/rpc.js";
 export type { CurrentToolMetadata } from "./generated/rpc.js";
+export type { SandboxConfigSource } from "./generated/rpc.js";
 export type {
+    AuthIdentityMetadata,
+    AuthInfoType,
+    ConnectorAccountRequest,
+    ConnectorAvailability,
+    ConnectorCapabilities,
+    ConnectorCatalogEntry,
+    ConnectorCatalogResult,
+    ConnectorCatalogStatus,
+    ConnectorConnectRequest,
+    ConnectorConnectResult,
+    ConnectorContinueRequest,
+    ConnectorDisconnectResult,
+    ConnectorMcpStatus,
+    ConnectorReconcileRequest,
+    ConnectorRuntimeStatus,
+    ConnectorSessionAccount,
+    ConnectorSessionAccountResult,
+    ConnectorStatus,
     ExtensionLaunchProfile,
     ExtensionLaunchProviderResolveRequest,
     ExtensionLaunchProviderResolveResult,
@@ -44,6 +66,11 @@ export type {
     GitHubTelemetryNotification,
     GitHubTelemetryEvent,
     GitHubTelemetryClientInfo,
+    InstallationConfirmationRequest,
+    InstallationConfirmationResponse,
+    InstallationDecision,
+    InstallationReview,
+    McpInstallationReview,
 } from "./generated/rpc.js";
 
 /**
@@ -398,6 +425,13 @@ export interface CopilotClientOptions {
      * @experimental
      */
     extensionLaunchProvider?: ExtensionLaunchProvider;
+
+    /**
+     * Connection-global human review for experimental installation operations.
+     * Does not register or enable installation capabilities on the runtime.
+     * @experimental
+     */
+    installationConfirmationHandler?: InstallationConfirmationHandler;
 
     /**
      * Log level for the Copilot runtime. When omitted, the runtime uses its
@@ -2055,6 +2089,8 @@ export interface McpAuthStaticClientConfig {
     grantType?: "client_credentials";
     /** Whether this is a public OAuth client. */
     publicClient?: boolean;
+    /** Configured OAuth scope string used when the server challenge omits scope. */
+    scope?: string;
 }
 
 /** MCP OAuth request that the SDK host can satisfy with a host-acquired token. */
@@ -2130,68 +2166,6 @@ export interface CanvasProviderIdentity {
     id: string;
     /** Optional display name surfaced as the canvas extension name. */
     name?: string;
-}
-
-/**
- * Static resource ceilings declared by a factory before it runs.
- *
- * @experimental Part of the experimental Agent Factories surface and may
- * change or be removed in future SDK or CLI releases.
- */
-export interface FactoryLimits {
-    /** Maximum number of factory subagents that may run concurrently. Must be positive when present. */
-    maxConcurrentSubagents?: number;
-    /** Maximum total number of factory subagents that may be spawned. Must be positive when present. */
-    maxTotalSubagents?: number;
-    /** Maximum AI credits consumed by factory subagents and descendants. This post-paid ceiling is soft. */
-    maxAiCredits?: number;
-    /**
-     * Maximum accumulated active-execution time, in seconds. Active execution includes the entire extension body,
-     * subprocess waits, queued-agent waits, and sleeps. The limit is armed from the remaining headroom when a run
-     * resumes; time between attempts is not counted. Must be finite and positive when present.
-     */
-    timeoutSeconds?: number;
-}
-
-/**
- * Registration metadata for an extension-authored factory.
- *
- * @experimental Part of the experimental Agent Factories surface and may
- * change or be removed in future SDK or CLI releases.
- */
-export interface FactoryMeta {
-    /** Stable factory name used for invocation. */
-    name: string;
-    /** Human-readable factory description. */
-    description: string;
-    /** Display metadata for the progress phases the factory may report. */
-    phases: Array<{ title: string; detail?: string }>;
-    /**
-     * Optional declared shape of the arguments this factory expects as `ctx.args`.
-     *
-     * Declaring one is strongly recommended for any factory that reads `ctx.args`.
-     * When the model invokes the factory through the `run_factory` tool, the CLI
-     * validates `args` against this declaration **before** the run starts, so a
-     * malformed call is rejected with a correction hint and retried without ever
-     * creating a run row, prompting the user for permission, or spending credits. A
-     * factory that declares nothing is never validated: a malformed call starts,
-     * takes an approval, spends credits, and then fails inside the factory body.
-     * `factories_manage` with `operation: "inspect"` reports the declared shape so an
-     * agent can read it before invoking.
-     *
-     * This covers the model's `run_factory` path only. `session.factory.run(...)` is
-     * not validated against the declaration, so a factory should still check
-     * `ctx.args` rather than assume the declared shape held.
-     *
-     * Enforcement covers structure — types, required properties, and enum/const
-     * values. Finer constraints such as `minLength`, `pattern`, and
-     * `additionalProperties` are recorded in the declaration but not enforced. See
-     * {@link FactoryJsonSchema} for the accepted subset. A declaration outside that
-     * subset is rejected at registration.
-     */
-    argsSchema?: FactoryJsonSchema;
-    /** Optional resource ceilings presented to the user before execution. */
-    limits?: FactoryLimits;
 }
 
 /**
@@ -2343,6 +2317,8 @@ export type AskUserVariant = "legacy" | "elicitation";
  * an existing one).
  */
 export interface SessionConfigBase {
+    /** Exact model IDs allowed by the host. Omission preserves runtime policy. */
+    allowedModels?: string[];
     /**
      * Client name to identify the application using the SDK.
      * Included in the User-Agent header for API requests.
@@ -2378,6 +2354,17 @@ export interface SessionConfigBase {
      * the session to the long-context tier; omit or use "default" otherwise.
      */
     contextTier?: ContextTier;
+
+    /**
+     * Enables session-scoped MCP diagnostic capture at the requested level.
+     *
+     * Diagnostics are off by default. At `"debug"` and `"trace"` levels, entries
+     * can contain MCP payloads, tool arguments, paths, and server stderr. Do not
+     * upload entries as telemetry or export them without deliberate host action.
+     * Omit this option when resuming a resident session to preserve its current
+     * diagnostic level.
+     */
+    diagnostics?: DiagnosticsConfiguration;
 
     /** Per-property overrides for model capabilities, deep-merged over runtime defaults. */
     modelCapabilities?: ModelCapabilitiesOverride;
@@ -3012,6 +2999,15 @@ export interface SessionConfig extends SessionConfigBase {
     sessionId?: string;
 
     /**
+     * Invalidates the process-wide custom-instruction discovery cache before
+     * creating this session. Use when instruction files changed in the same runtime.
+     * Other sessions in this runtime may observe updated instructions on later turns
+     * or discovery. This does not watch files or enable disabled instruction loading.
+     * @default false
+     */
+    refreshCustomInstructions?: boolean;
+
+    /**
      * Creates a remote session in the cloud instead of a local session.
      * The optional repository is associated with the cloud session.
      */
@@ -3024,6 +3020,11 @@ export interface SessionConfig extends SessionConfigBase {
  */
 export interface ResumeSessionConfig extends SessionConfigBase {
     /**
+     * Allow the runtime to recover a damaged transcript during resume.
+     * Defaults to true in all modes. Set false to reject recovery.
+     */
+    allowTranscriptRecovery?: boolean;
+    /**
      * When true, skips emitting the session.resume event.
      * Useful for reconnecting to a session without triggering resume-related side effects.
      * @default false
@@ -3032,7 +3033,8 @@ export interface ResumeSessionConfig extends SessionConfigBase {
     /**
      * When true, the runtime continues any tool calls or permission prompts that were
      * still pending when the session was last suspended. When false (the default), the
-     * runtime treats pending work as interrupted on resume.
+     * runtime treats pending work as interrupted on resume. Completed tool results
+     * already durably recorded by the runtime are preserved.
      *
      * For permission requests, the runtime re-emits `permission.requested` so the
      * registered `onPermissionRequest` handler can re-prompt; for external tool calls,
@@ -3047,6 +3049,16 @@ export interface ResumeSessionConfig extends SessionConfigBase {
      * do not need to re-open canvases that were active before the previous shutdown.
      */
     openCanvases?: OpenCanvasInstance[];
+}
+
+/** Transcript repair proposed during the most recent resume. */
+export interface TranscriptRecovery {
+    /** Planned backup path; the backup is written on the next append. */
+    plannedBackupPath: string;
+    /** One-based physical line numbers removed from the transcript. */
+    invalidLineNumbers: number[];
+    /** Whether an existing session.start event was moved to the beginning. */
+    sessionStartMoved: boolean;
 }
 
 /**

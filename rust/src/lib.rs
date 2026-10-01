@@ -3,7 +3,26 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-#[cfg(not(feature = "bundled-cli"))]
+/// Experimental runtime-owned Agent Host Protocol listeners.
+pub mod ahp_host;
+pub use ahp_host::{
+    AhpHost, AhpHostExit, AhpHostExitCallback, AhpHostExitReason, AhpHostOptions,
+    AhpSessionFactory, AhpSessionReleasedCallback, AhpSessionRequest, AhpSessionResumeFactory,
+    AhpSessionResumeRequest,
+};
+
+// Outside tests, `cache_paths`'s only caller is `resolve::extracted_program`, which
+// needs the build script to have extracted a CLI (`has_extracted_cli`). Without it the
+// module is compiled only for its own unit tests, which exercise the pure path helpers;
+// `extracted_runtime_install_dir` and `platform_cache_dir` then have no caller in the
+// lib test unit (the build script reaches them through its own `#[path]` include).
+#[cfg_attr(all(test, not(has_extracted_cli)), expect(dead_code))]
+#[cfg(all(
+    feature = "runtime",
+    not(feature = "bundled-cli"),
+    not(feature = "local-runtime"),
+    any(test, has_extracted_cli)
+))]
 mod cache_paths;
 /// Canvas declarations, provider callbacks, and host-side canvas RPC types.
 pub mod canvas;
@@ -15,7 +34,7 @@ mod errors;
 /// Connection-level extension launch profile provider.
 pub mod extension_launch_provider;
 /// In-process FFI transport hosting the runtime cdylib (`Transport::InProcess`).
-#[cfg(feature = "bundled-in-process")]
+#[cfg(feature = "in-process")]
 pub(crate) mod ffi;
 pub use errors::*;
 /// Connection-level Copilot request handler — intercept and replace the
@@ -32,6 +51,8 @@ pub mod github_token;
 pub mod handler;
 /// Lifecycle hook callbacks (pre/post tool use, prompt submission, session start/end).
 pub mod hooks;
+/// Connection-global human confirmation for experimental installation operations.
+pub mod installation_confirmation;
 mod jsonrpc;
 /// Permission-policy helpers that produce a [`handler::PermissionHandler`].
 pub mod permission;
@@ -40,6 +61,7 @@ mod process_tree;
 pub mod provider_token;
 mod provider_token_dispatch;
 /// GitHub Copilot CLI binary resolution (env var, embedded, dev cache).
+#[cfg(feature = "runtime")]
 pub(crate) mod resolve;
 mod router;
 /// Session management — create, resume, send messages, and interact with the agent.
@@ -85,7 +107,10 @@ pub(crate) mod generated;
 pub mod mode;
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "runtime")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "runtime")]
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -116,11 +141,20 @@ pub mod test_support {
     };
 }
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+#[cfg(feature = "runtime")]
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(feature = "runtime")]
 use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{Instrument, debug, error, info, warn};
+use tokio::process::Child;
+#[cfg(feature = "runtime")]
+use tokio::process::Command;
+#[cfg(feature = "runtime")]
+use tokio::sync::oneshot;
+use tokio::sync::{broadcast, mpsc};
+#[cfg(feature = "runtime")]
+use tracing::Instrument;
+use tracing::{debug, error, info, warn};
 pub use types::*;
 
 mod sdk_protocol_version;
@@ -132,6 +166,7 @@ pub use subscription::{EventSubscription, LifecycleSubscription};
 const MIN_PROTOCOL_VERSION: u32 = 3;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(feature = "runtime")]
 fn record_optional_millis(span: &tracing::Span, field: &'static str, value: Option<u64>) {
     match value {
         Some(value) => {
@@ -164,7 +199,8 @@ pub enum Transport {
     /// authentication, log level, and [`ClientOptions::base_directory`] remain
     /// supported.
     ///
-    /// Requires the `bundled-in-process` Cargo feature.
+    /// Requires the `in-process` Cargo feature, enabled by either
+    /// `bundled-in-process` or `local-runtime`.
     InProcess,
     /// Spawn the CLI with `--port` and connect via TCP.
     Tcp {
@@ -352,6 +388,12 @@ pub struct ClientOptions {
     /// of sessions.
     pub extension_launch_provider:
         Option<Arc<dyn crate::extension_launch_provider::ExtensionLaunchProvider>>,
+    /// Connection-global human review handler for `installations.confirm` (experimental).
+    ///
+    /// This receives requests without session routing or inferred operation authority.
+    /// It does not register or enable installation capabilities on the runtime.
+    pub installation_confirmation_handler:
+        Option<Arc<dyn crate::installation_confirmation::InstallationConfirmationHandler>>,
     /// Connection-level GitHub telemetry forwarding callback (experimental).
     ///
     /// When set, every session created or resumed on this client opts into
@@ -543,6 +585,13 @@ impl std::fmt::Debug for ClientOptions {
             .field(
                 "extension_launch_provider",
                 &self.extension_launch_provider.as_ref().map(|_| "<set>"),
+            )
+            .field(
+                "installation_confirmation_handler",
+                &self
+                    .installation_confirmation_handler
+                    .as_ref()
+                    .map(|_| "<set>"),
             )
             .field(
                 "on_github_telemetry",
@@ -799,6 +848,7 @@ impl Default for ClientOptions {
             session_fs: None,
             request_handler: None,
             extension_launch_provider: None,
+            installation_confirmation_handler: None,
             on_github_telemetry: None,
             on_get_trace_context: None,
             telemetry: None,
@@ -970,6 +1020,15 @@ impl ClientOptions {
         self
     }
 
+    /// Install a connection-global human confirmation handler (experimental).
+    pub fn with_installation_confirmation_handler<H>(mut self, handler: H) -> Self
+    where
+        H: crate::installation_confirmation::InstallationConfirmationHandler,
+    {
+        self.installation_confirmation_handler = Some(Arc::new(handler));
+        self
+    }
+
     /// Register a connection-level GitHub telemetry forwarding callback
     /// (internal/experimental). Registering a callback auto-enables telemetry
     /// forwarding on every session created or resumed on this client; the
@@ -1048,6 +1107,7 @@ impl ClientOptions {
 }
 
 /// Validate a [`SessionFsConfig`] before sending `sessionFs.setProvider`.
+#[cfg(feature = "runtime")]
 fn validate_session_fs_config(cfg: &SessionFsConfig) -> Result<()> {
     if cfg.initial_cwd.trim().is_empty() {
         return Err(Error::with_message(
@@ -1070,9 +1130,10 @@ fn validate_session_fs_config(cfg: &SessionFsConfig) -> Result<()> {
 /// pre-1.0 review consensus, so adopting a `Uuid` type just for SDK-
 /// generated secrets would be inconsistent and semantically misleading;
 /// this is opaque random data, not an identifier).
+#[cfg(any(feature = "runtime", test, feature = "test-support"))]
 fn generate_connection_token() -> String {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .expect("OS CSPRNG (getrandom) is unavailable; cannot generate connection token");
     let mut hex = String::with_capacity(32);
     for byte in bytes {
@@ -1086,9 +1147,11 @@ fn generate_connection_token() -> String {
 /// leaves [`ClientOptions::transport`] at [`Transport::Default`].
 /// Accepts `"inprocess"` or `"stdio"` (case-insensitive); unset preserves
 /// stdio. Any other value is an error.
+#[cfg(feature = "runtime")]
 const DEFAULT_CONNECTION_ENV_VAR: &str = "COPILOT_SDK_DEFAULT_CONNECTION";
 
 /// Resolve a transport override from [`DEFAULT_CONNECTION_ENV_VAR`].
+#[cfg(feature = "runtime")]
 fn resolve_default_transport(options: &ClientOptions) -> Result<Transport> {
     let configured = options
         .env
@@ -1102,6 +1165,7 @@ fn resolve_default_transport(options: &ClientOptions) -> Result<Transport> {
     resolve_default_transport_value(configured.as_deref().or(process.as_deref()))
 }
 
+#[cfg(feature = "runtime")]
 fn resolve_default_transport_value(value: Option<&str>) -> Result<Transport> {
     match value {
         None => Ok(Transport::Stdio),
@@ -1117,7 +1181,7 @@ fn resolve_default_transport_value(value: Option<&str>) -> Result<Transport> {
     }
 }
 
-#[cfg(any(feature = "bundled-in-process", test))]
+#[cfg(any(feature = "in-process", test))]
 fn validate_inprocess_options(options: &ClientOptions) -> Result<()> {
     if !matches!(&options.program, CliProgram::Resolve) {
         return Err(Error::with_message(
@@ -1167,6 +1231,8 @@ fn validate_inprocess_options(options: &ClientOptions) -> Result<()> {
 /// The child process (if any) is killed when the last clone drops.
 #[derive(Clone)]
 pub struct Client {
+    // Session-internal clients share the connection, not its AHP retention root.
+    ahp_host_sessions: Option<Arc<ahp_host::HostSessions>>,
     inner: Arc<ClientInner>,
 }
 
@@ -1180,9 +1246,13 @@ impl std::fmt::Debug for Client {
 }
 
 struct ClientInner {
+    ahp_host_callbacks: Arc<ahp_host::ExitCallbacks>,
+    ahp_host_sessions: std::sync::Weak<ahp_host::HostSessions>,
     child: parking_lot::Mutex<Option<Child>>,
+    owns_stdio: bool,
+    force_stop_requested: tokio_util::sync::CancellationToken,
     process_tree: parking_lot::Mutex<Option<process_tree::ProcessTree>>,
-    #[cfg(feature = "bundled-in-process")]
+    #[cfg(feature = "in-process")]
     /// In-process FFI runtime host, set only for [`Transport::InProcess`].
     /// Closing it tears down the native runtime connection.
     ffi_host: parking_lot::Mutex<Option<Arc<crate::ffi::FfiShared>>>,
@@ -1203,6 +1273,7 @@ struct ClientInner {
     /// [`ClientOptions::request_handler`] is set.
     llm_inference: OnceLock<Arc<copilot_request_handler::CopilotRequestDispatcher>>,
     extension_launch_provider: Arc<extension_launch_provider::ExtensionLaunchProviderDispatcher>,
+    installation_confirmation: Arc<installation_confirmation::InstallationConfirmationDispatcher>,
     /// Connection-level GitHub telemetry forwarding callback, set from
     /// [`ClientOptions::on_github_telemetry`]. Drives the
     /// `enableGitHubTelemetryForwarding` wire flag and the
@@ -1227,6 +1298,19 @@ struct ClientInner {
     startup_timings: OnceLock<StartupTimings>,
 }
 
+struct StdioShutdownGuard<'a> {
+    client: &'a Client,
+    armed: bool,
+}
+
+impl Drop for StdioShutdownGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.client.force_stop();
+        }
+    }
+}
+
 impl Client {
     /// Start a CLI server process with the given options.
     ///
@@ -1240,6 +1324,7 @@ impl Client {
     /// When [`ClientOptions::session_fs`] is set, also calls
     /// `sessionFs.setProvider` to register the SDK as the filesystem
     /// backend.
+    #[cfg(feature = "runtime")]
     pub async fn start(options: ClientOptions) -> Result<Self> {
         let start_time = Instant::now();
         let mut timings = StartupTimings::default();
@@ -1248,14 +1333,14 @@ impl Client {
             options.transport = resolve_default_transport(&options)?;
         }
         if matches!(options.transport, Transport::InProcess) {
-            #[cfg(not(feature = "bundled-in-process"))]
+            #[cfg(not(feature = "in-process"))]
             {
                 return Err(Error::with_message(
                     ErrorKind::InvalidConfig,
-                    "Transport::InProcess requires the `bundled-in-process` Cargo feature",
+                    "Transport::InProcess requires the `in-process` Cargo feature",
                 ));
             }
-            #[cfg(feature = "bundled-in-process")]
+            #[cfg(feature = "in-process")]
             validate_inprocess_options(&options)?;
         }
         if options.mode == ClientMode::Empty
@@ -1353,6 +1438,7 @@ impl Client {
         let session_fs_config = options.session_fs.clone();
         let request_handler = options.request_handler.clone();
         let extension_launch_provider = options.extension_launch_provider.clone();
+        let installation_confirmation_handler = options.installation_confirmation_handler.clone();
         let session_fs_sqlite_declared = session_fs_config
             .as_ref()
             .and_then(|c| c.capabilities.as_ref())
@@ -1433,6 +1519,7 @@ impl Client {
                     effective_connection_token.clone(),
                     options.mode,
                     options.client_info,
+                    false,
                 )?
             }
             Transport::Tcp {
@@ -1467,6 +1554,7 @@ impl Client {
                     effective_connection_token.clone(),
                     options.mode,
                     options.client_info,
+                    false,
                 )?
             }
             Transport::Stdio => {
@@ -1491,10 +1579,11 @@ impl Client {
                     effective_connection_token.clone(),
                     options.mode,
                     options.client_info,
+                    true,
                 )?
             }
             Transport::InProcess => {
-                #[cfg(feature = "bundled-in-process")]
+                #[cfg(feature = "in-process")]
                 {
                     info!(runtime_path = %program.display(), "hosting copilot runtime in-process (FFI)");
                     let mut environment = Vec::new();
@@ -1559,15 +1648,20 @@ impl Client {
                         effective_connection_token.clone(),
                         options.mode,
                         options.client_info,
+                        false,
                     )?;
                     *client.inner.ffi_host.lock() = Some(shared);
                     client
                 }
-                #[cfg(not(feature = "bundled-in-process"))]
+                #[cfg(not(feature = "in-process"))]
                 unreachable!("in-process feature validation returned above")
             }
         };
         timings.transport_setup_ms = StartupTimings::millis(transport_setup_start.elapsed());
+        client
+            .inner
+            .installation_confirmation
+            .set_handler(installation_confirmation_handler);
         debug!(
             elapsed_ms = start_time.elapsed().as_millis(),
             "Client::start transport setup complete"
@@ -1587,15 +1681,8 @@ impl Client {
             let _ = client.inner.llm_inference.set(dispatcher.clone());
             dispatcher
         });
+        client.inner.router.ensure_started(&client.inner);
         if client.inner.extension_launch_provider.is_configured() {
-            client.inner.router.ensure_started(
-                &client.inner.notification_tx,
-                &client.inner.request_rx,
-                client.inner.extension_launch_provider.clone(),
-                request_dispatcher.clone(),
-                client.inner.on_github_telemetry.clone(),
-                client.inner.github_token_registry.clone(),
-            );
             client.rpc().register_extension_launch_provider().await?;
         }
         if !builtin_plugin_directories.is_empty() {
@@ -1627,18 +1714,8 @@ impl Client {
                 "Client::start session filesystem setup complete"
             );
         }
-        if let Some(dispatcher) = request_dispatcher {
+        if request_dispatcher.is_some() {
             let llm_inference_start = Instant::now();
-            // Start the router early (before any session is registered) so the
-            // startup model catalog request is dispatched to the handler.
-            client.inner.router.ensure_started(
-                &client.inner.notification_tx,
-                &client.inner.request_rx,
-                client.inner.extension_launch_provider.clone(),
-                Some(dispatcher.clone()),
-                client.inner.on_github_telemetry.clone(),
-                client.inner.github_token_registry.clone(),
-            );
             client.rpc().llm_inference().set_provider().await?;
             let llm_inference_elapsed = llm_inference_start.elapsed();
             timings.llm_handler_ms = Some(StartupTimings::millis(llm_inference_elapsed));
@@ -1679,6 +1756,53 @@ impl Client {
         Ok(client)
     }
 
+    /// Runtime startup is unavailable in an external-stream-only build.
+    ///
+    /// Enable the `runtime` feature to launch or discover a runtime, or use
+    /// [`Client::from_streams`] to attach an externally supplied connection.
+    #[cfg(not(feature = "runtime"))]
+    pub async fn start(_options: ClientOptions) -> Result<Self> {
+        Err(Error::with_message(
+            ErrorKind::InvalidConfig,
+            "Client::start requires the `runtime` Cargo feature; use Client::from_streams",
+        ))
+    }
+
+    /// Register an inbound connection-level SDK JSON-RPC operation.
+    ///
+    /// The handler runs independently of the reader, so it may await ordinary
+    /// SDK requests on this connection. Its result is written using the normal
+    /// framed writer. Duplicate registrations are rejected.
+    /// Use the supplied request-scoped client for SDK calls instead of capturing
+    /// a client clone, which would create an ownership cycle in the registry.
+    ///
+    /// This low-level integration hook is used by runtime-supervised hosts.
+    #[doc(hidden)]
+    pub fn register_request_handler<F, Fut>(&self, method: &str, handler: F) -> Result<()>
+    where
+        F: Fn(serde_json::Value, Client) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<serde_json::Value>> + Send + 'static,
+    {
+        let client = Arc::downgrade(&self.inner);
+        let handler = Arc::new(handler);
+        self.inner.rpc.register_request_handler(
+            method,
+            Arc::new(move |params| {
+                let client = client.clone();
+                let handler = handler.clone();
+                Box::pin(async move {
+                    let inner = client.upgrade().ok_or_else(|| {
+                        Error::with_message(
+                            ErrorKind::Protocol(ProtocolErrorKind::RequestCancelled),
+                            "Request handler connection is closed",
+                        )
+                    })?;
+                    handler(params, Client::from_inner(inner)).await
+                })
+            }),
+        )
+    }
+
     /// Create a Client from raw async streams (no child process).
     ///
     /// Useful for testing or connecting to a server over a custom transport.
@@ -1702,6 +1826,7 @@ impl Client {
             None,
             ClientMode::default(),
             None,
+            false,
         )
     }
 
@@ -1730,7 +1855,25 @@ impl Client {
             None,
             ClientMode::default(),
             None,
+            false,
         )
+    }
+
+    /// Construct a client with a confirmation handler for framed transport tests.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_streams_with_installation_confirmation_handler(
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+        cwd: PathBuf,
+        handler: Arc<dyn crate::installation_confirmation::InstallationConfirmationHandler>,
+    ) -> Result<Self> {
+        let client = Self::from_streams(reader, writer, cwd)?;
+        client
+            .inner
+            .installation_confirmation
+            .set_handler(Some(handler));
+        Ok(client)
     }
 
     /// Construct a [`Client`] from raw streams with a
@@ -1762,6 +1905,7 @@ impl Client {
             None,
             ClientMode::default(),
             None,
+            false,
         )
     }
 
@@ -1790,6 +1934,7 @@ impl Client {
             token,
             ClientMode::default(),
             None,
+            false,
         )
     }
 
@@ -1818,6 +1963,7 @@ impl Client {
             None,
             ClientMode::default(),
             None,
+            false,
         )
     }
 
@@ -1857,6 +2003,7 @@ impl Client {
             None,
             ClientMode::default(),
             client_info,
+            false,
         )
     }
 
@@ -1878,15 +2025,18 @@ impl Client {
         effective_connection_token: Option<String>,
         mode: ClientMode,
         client_info: Option<ClientInfo>,
+        owns_stdio: bool,
     ) -> Result<Self> {
         let setup_start = Instant::now();
         let (request_tx, request_rx) = mpsc::unbounded_channel::<JsonRpcRequest>();
         let (notification_broadcast_tx, _) = broadcast::channel::<JsonRpcNotification>(1024);
-        let rpc = JsonRpcClient::new(
+        let (host_notification_tx, host_notification_rx) = mpsc::unbounded_channel();
+        let rpc = JsonRpcClient::new_with_host_notifications(
             writer,
             reader,
             notification_broadcast_tx.clone(),
             request_tx,
+            Some(host_notification_tx),
         );
 
         let pid = child.as_ref().and_then(|c| c.id());
@@ -1898,11 +2048,19 @@ impl Client {
                 extension_launch_provider,
             ),
         );
+        let installation_confirmation =
+            Arc::new(installation_confirmation::InstallationConfirmationDispatcher::new());
+        let ahp_host_sessions = Arc::new(ahp_host::HostSessions::new());
         let client = Self {
+            ahp_host_sessions: Some(ahp_host_sessions.clone()),
             inner: Arc::new(ClientInner {
+                ahp_host_callbacks: Arc::new(ahp_host::ExitCallbacks::default()),
+                ahp_host_sessions: Arc::downgrade(&ahp_host_sessions),
                 child: parking_lot::Mutex::new(child),
+                owns_stdio,
+                force_stop_requested: tokio_util::sync::CancellationToken::new(),
                 process_tree: parking_lot::Mutex::new(process_tree),
-                #[cfg(feature = "bundled-in-process")]
+                #[cfg(feature = "in-process")]
                 ffi_host: parking_lot::Mutex::new(None),
                 rpc,
                 cwd,
@@ -1919,6 +2077,7 @@ impl Client {
                 session_fs_sqlite_declared,
                 llm_inference: OnceLock::new(),
                 extension_launch_provider: extension_launch_provider.clone(),
+                installation_confirmation: installation_confirmation.clone(),
                 on_github_telemetry,
                 on_get_trace_context,
                 effective_connection_token,
@@ -1927,9 +2086,13 @@ impl Client {
                 startup_timings: OnceLock::new(),
             }),
         };
+        ahp_host_sessions.set_owner(Arc::downgrade(&client.inner));
         github_token_registry.set_client(Arc::downgrade(&client.inner));
         extension_launch_provider.set_client(Arc::downgrade(&client.inner));
+        installation_confirmation.set_client(Arc::downgrade(&client.inner));
         client.spawn_lifecycle_dispatcher();
+        client.spawn_ahp_host_dispatcher(host_notification_rx);
+        client.register_ahp_session_factory()?;
         debug!(
             elapsed_ms = setup_start.elapsed().as_millis(),
             pid = ?pid,
@@ -1978,6 +2141,7 @@ impl Client {
         });
     }
 
+    #[cfg(feature = "runtime")]
     fn build_command(program: &Path, options: &ClientOptions, working_directory: &Path) -> Command {
         let mut command = Command::new(program);
         command.kill_on_drop(true);
@@ -2036,6 +2200,9 @@ impl Client {
         for key in &options.env_remove {
             command.env_remove(key);
         }
+        if options.mode != ClientMode::Empty {
+            command.env("COPILOT_RUNTIME_PROCESS_FILE_LOGGING", "1");
+        }
         command
             .current_dir(working_directory)
             .stdout(Stdio::piped())
@@ -2051,6 +2218,7 @@ impl Client {
     /// When the effective `use_logged_in_user` is `false` (either explicitly
     /// or because a token was provided without an override), adds
     /// `--no-auto-login`.
+    #[cfg(feature = "runtime")]
     fn auth_args(options: &ClientOptions) -> Vec<&'static str> {
         let mut args: Vec<&'static str> = Vec::new();
         if options.github_token.is_some() {
@@ -2069,6 +2237,7 @@ impl Client {
     /// Returns `--session-idle-timeout <secs>` when
     /// [`ClientOptions::session_idle_timeout_seconds`] is `Some(n)` with
     /// `n > 0`. Otherwise returns an empty vector.
+    #[cfg(feature = "runtime")]
     fn session_idle_timeout_args(options: &ClientOptions) -> Vec<String> {
         match options.session_idle_timeout_seconds {
             Some(secs) if secs > 0 => {
@@ -2078,6 +2247,7 @@ impl Client {
         }
     }
 
+    #[cfg(feature = "runtime")]
     fn remote_args(options: &ClientOptions) -> Vec<String> {
         if options.enable_remote_sessions {
             vec!["--remote".to_string()]
@@ -2086,6 +2256,7 @@ impl Client {
         }
     }
 
+    #[cfg(feature = "runtime")]
     fn log_level_args(options: &ClientOptions) -> Vec<&'static str> {
         match options.log_level {
             Some(level) => vec!["--log-level", level.as_str()],
@@ -2093,6 +2264,7 @@ impl Client {
         }
     }
 
+    #[cfg(feature = "runtime")]
     fn spawn_stdio(
         program: &Path,
         options: &ClientOptions,
@@ -2118,6 +2290,7 @@ impl Client {
         Ok((child, tree, spawn_elapsed))
     }
 
+    #[cfg(feature = "runtime")]
     async fn spawn_tcp(
         program: &Path,
         options: &ClientOptions,
@@ -2191,6 +2364,7 @@ impl Client {
         Ok((child, tree, actual_port, spawn_elapsed, port_wait_elapsed))
     }
 
+    #[cfg(feature = "runtime")]
     fn drain_stderr(child: &mut Child) {
         if let Some(stderr) = child.stderr.take() {
             let span = tracing::error_span!("copilot_cli");
@@ -2335,7 +2509,10 @@ impl Client {
 
     /// Reconstruct a [`Client`] handle from a shared inner pointer.
     pub(crate) fn from_inner(inner: Arc<ClientInner>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            ahp_host_sessions: None,
+        }
     }
 
     /// Take the receiver for incoming JSON-RPC requests from the CLI.
@@ -2360,14 +2537,7 @@ impl Client {
         &self,
         session_id: &SessionId,
     ) -> crate::router::SessionRegistration {
-        self.inner.router.ensure_started(
-            &self.inner.notification_tx,
-            &self.inner.request_rx,
-            self.inner.extension_launch_provider.clone(),
-            self.inner.llm_inference.get().cloned(),
-            self.inner.on_github_telemetry.clone(),
-            self.inner.github_token_registry.clone(),
-        );
+        self.inner.router.ensure_started(&self.inner);
         self.inner.router.register(session_id)
     }
 
@@ -2401,14 +2571,7 @@ impl Client {
         &self,
         provider: Arc<dyn GitHubTokenProvider>,
     ) -> github_token::GitHubTokenRegistration {
-        self.inner.router.ensure_started(
-            &self.inner.notification_tx,
-            &self.inner.request_rx,
-            self.inner.extension_launch_provider.clone(),
-            self.inner.llm_inference.get().cloned(),
-            self.inner.on_github_telemetry.clone(),
-            self.inner.github_token_registry.clone(),
-        );
+        self.inner.router.ensure_started(&self.inner);
         let id = self.inner.github_token_registry.register(provider);
         github_token::GitHubTokenRegistration::new(self.inner.github_token_registry.clone(), id)
     }
@@ -2634,14 +2797,7 @@ impl Client {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn start_router_for_test(&self) {
-        self.inner.router.ensure_started(
-            &self.inner.notification_tx,
-            &self.inner.request_rx,
-            self.inner.extension_launch_provider.clone(),
-            self.inner.llm_inference.get().cloned(),
-            self.inner.on_github_telemetry.clone(),
-            self.inner.github_token_registry.clone(),
-        );
+        self.inner.router.ensure_started(&self.inner);
     }
 
     #[cfg(feature = "test-support")]
@@ -2797,8 +2953,10 @@ impl Client {
     /// Cooperatively shut down the client and the CLI child process.
     ///
     /// Walks every still-registered session and sends `session.detach`
-    /// for each one, asks SDK-owned runtimes to shut down, terminates the
-    /// Windows-owned CLI Job Object when present, and reaps the root process.
+    /// for each one and asks SDK-owned runtimes to shut down. For an owned stdio
+    /// child, closes stdin and waits up to 10 seconds for host cleanup and exit
+    /// before falling back to termination. Terminates the Windows-owned CLI
+    /// Job Object when present and bounds the final root-process reap to 10 seconds.
     /// Errors from per-session detaches, runtime shutdown, and final process
     /// termination are collected into [`StopErrors`] rather than
     /// short-circuiting on the first failure — so callers see the full picture
@@ -2806,7 +2964,7 @@ impl Client {
     ///
     /// If you have already called [`Session::disconnect`] on every
     /// session this client created, the per-session destroy step is a
-    /// no-op (the router map is empty); only the child-kill remains.
+    /// no-op (the router map is empty); runtime and process shutdown still run.
     ///
     /// [`Session::disconnect`]: crate::session::Session::disconnect
     ///
@@ -2821,11 +2979,14 @@ impl Client {
     /// or call `stop()` again with a fresh future. The documented
     /// `tokio::time::timeout(..., client.stop())` pattern in the example
     /// below uses `force_stop` as the fallback for exactly this case.
+    /// Once owned-stdio exit waiting begins, cancelling `stop()` forcibly
+    /// terminates that child. Concurrent `force_stop()` also interrupts the wait.
     pub async fn stop(&self) -> std::result::Result<(), StopErrors> {
         let pid = self.pid();
         info!(pid = ?pid, "stopping CLI process");
         let mut errors: Vec<Error> = Vec::new();
         self.inner.extension_launch_provider.clear();
+        self.inner.installation_confirmation.clear();
 
         // Snapshot the registered session IDs without holding the router
         // lock across the detach RPCs.
@@ -2846,7 +3007,7 @@ impl Client {
         self.inner.github_token_registry.clear();
 
         let should_shutdown_runtime = self.inner.child.lock().is_some();
-        #[cfg(feature = "bundled-in-process")]
+        #[cfg(feature = "in-process")]
         let should_shutdown_runtime =
             should_shutdown_runtime || self.inner.ffi_host.lock().is_some();
         if should_shutdown_runtime {
@@ -2884,10 +3045,43 @@ impl Client {
             }
         }
 
-        let child = self.inner.child.lock().take();
-        let process_tree = self.inner.process_tree.lock().take();
         *self.inner.state.lock() = ConnectionState::Disconnected;
         *self.inner.models_cache.lock() = Arc::new(tokio::sync::OnceCell::new());
+        if self.inner.owns_stdio && self.inner.child.lock().is_some() {
+            let mut guard = StdioShutdownGuard {
+                client: self,
+                armed: true,
+            };
+            // The host flushes telemetry after stdin EOF, not after the shutdown RPC.
+            // Drop ChildStdin but retain the reader and process tree until exit.
+            self.inner.rpc.close_writer();
+            let wait = async {
+                tokio::select! {
+                    result = std::future::poll_fn(|cx| {
+                        let mut child = self.inner.child.lock();
+                        let Some(child) = child.as_mut() else {
+                            return std::task::Poll::Ready(Ok(()));
+                        };
+                        // Child::wait is cancel-safe; retain ownership between polls so
+                        // synchronous force_stop can still terminate the child and its tree.
+                        std::future::Future::poll(std::pin::pin!(child.wait()), cx)
+                            .map(|result| result.map(|_| ()))
+                    }) => result,
+                    _ = self.inner.force_stop_requested.cancelled() => Ok(()),
+                }
+            };
+            match tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, wait).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => errors.push(error.into()),
+                Err(_) => warn!(
+                    timeout = ?RUNTIME_SHUTDOWN_TIMEOUT,
+                    "CLI did not exit after stdin EOF; terminating"
+                ),
+            }
+            guard.armed = false;
+        }
+        let child = self.inner.child.lock().take();
+        let process_tree = self.inner.process_tree.lock().take();
         if let Some(process_tree) = process_tree
             && let Err(error) = process_tree.terminate()
         {
@@ -2897,14 +3091,16 @@ impl Client {
             match child.try_wait() {
                 Ok(Some(_status)) => {}
                 Ok(None) => {
-                    // The runtime completes all cleanup before responding to
-                    // runtime.shutdown and then leaves termination to us; it
-                    // deliberately keeps its JSON-RPC server alive to send the
-                    // response and never self-exits. Waiting for a self-exit
-                    // that will never come just wastes time, so terminate the
-                    // child immediately.
-                    if let Err(e) = child.kill().await {
-                        errors.push(e.into());
+                    match tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, child.kill()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => errors.push(error.into()),
+                        Err(_) => errors.push(
+                            std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "CLI process reap timed out during Client::stop",
+                            )
+                            .into(),
+                        ),
                     }
                 }
                 Err(e) => errors.push(e.into()),
@@ -2914,10 +3110,13 @@ impl Client {
         // Provider registration is scoped to the connection. Closing the
         // transport unregisters it and prevents stale callbacks after stop.
         self.inner.rpc.force_close();
-        #[cfg(feature = "bundled-in-process")]
+        #[cfg(feature = "in-process")]
         {
-            if let Some(host) = self.inner.ffi_host.lock().take() {
-                host.close();
+            let host = self.inner.ffi_host.lock().take();
+            if let Some(host) = host
+                && let Err(error) = tokio::task::spawn_blocking(move || host.close()).await
+            {
+                errors.push(Error::new(ErrorKind::Io, error));
             }
         }
 
@@ -2961,6 +3160,7 @@ impl Client {
         let pid = self.pid();
         info!(pid = ?pid, "force-stopping CLI process");
         self.inner.extension_launch_provider.clear();
+        self.inner.installation_confirmation.clear();
         if let Some(process_tree) = self.inner.process_tree.lock().take()
             && let Err(error) = process_tree.terminate()
         {
@@ -2971,8 +3171,9 @@ impl Client {
         {
             error!(pid = ?pid, error = %e, "failed to send kill signal");
         }
+        self.inner.force_stop_requested.cancel();
         self.inner.rpc.force_close();
-        #[cfg(feature = "bundled-in-process")]
+        #[cfg(feature = "in-process")]
         {
             if let Some(host) = self.inner.ffi_host.lock().take() {
                 host.close();
@@ -3027,6 +3228,7 @@ impl Client {
 
 impl Drop for ClientInner {
     fn drop(&mut self) {
+        self.rpc.force_close();
         let pid = self.child.lock().as_ref().and_then(Child::id);
         if let Some(process_tree) = self.process_tree.lock().take()
             && let Err(error) = process_tree.terminate()
@@ -3040,17 +3242,16 @@ impl Drop for ClientInner {
                 info!(pid = ?pid, "kill signal sent for CLI process on drop");
             }
         }
-        #[cfg(feature = "bundled-in-process")]
+        #[cfg(feature = "in-process")]
         {
             if let Some(host) = self.ffi_host.lock().take() {
-                self.rpc.force_close();
                 host.close();
             }
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::*;
 
@@ -3158,14 +3359,14 @@ mod tests {
         assert!(validate_inprocess_options(&options).is_ok());
     }
 
-    #[cfg(not(feature = "bundled-in-process"))]
+    #[cfg(not(feature = "in-process"))]
     #[tokio::test]
     async fn inprocess_requires_cargo_feature() {
         let error = Client::start(ClientOptions::new().with_transport(Transport::InProcess))
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("bundled-in-process"));
+        assert!(error.to_string().contains("in-process"));
     }
 
     #[test]
@@ -3547,6 +3748,34 @@ mod tests {
     }
 
     #[test]
+    fn cli_mode_opts_into_process_logging_without_changing_empty_mode_environment() {
+        for (mode, expected) in [
+            (ClientMode::Empty, None),
+            (ClientMode::CopilotCli, Some("1")),
+        ] {
+            let mut options = ClientOptions::default().with_mode(mode);
+            options.env.push((
+                std::ffi::OsString::from("COPILOT_RUNTIME_PROCESS_FILE_LOGGING"),
+                std::ffi::OsString::from("opposite"),
+            ));
+            let command =
+                Client::build_command(Path::new("copilot-runtime"), &options, Path::new("."));
+            let actual = command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| {
+                    *key == std::ffi::OsStr::new("COPILOT_RUNTIME_PROCESS_FILE_LOGGING")
+                })
+                .and_then(|(_, value)| value);
+            assert_eq!(
+                actual,
+                Some(std::ffi::OsStr::new(expected.unwrap_or("opposite"))),
+                "mode: {mode:?}"
+            );
+        }
+    }
+
+    #[test]
     fn log_level_str_round_trips() {
         for level in [
             LogLevel::None,
@@ -3704,6 +3933,7 @@ mod tests {
             None,
             ClientMode::default(),
             None,
+            false,
         )
         .unwrap();
 
@@ -3731,30 +3961,24 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     fn test_child_command(temp: &Path, ready: &Path, survived: &Path) -> Command {
-        #[cfg(unix)]
-        let mut command = {
-            let mut command =
-                Client::build_command(Path::new("sh"), &ClientOptions::default(), temp);
-            command.args([
-                "-c",
-                "printf ready > \"$READY\"; sleep 1; printf survived > \"$SURVIVED\"",
-            ]);
-            command
-        };
+        let mut command = Client::build_command(Path::new("node"), &ClientOptions::default(), temp);
         #[cfg(windows)]
-        let mut command = {
-            let mut command =
-                Client::build_command(Path::new("powershell.exe"), &ClientOptions::default(), temp);
-            command.args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Set-Content -LiteralPath $env:READY ready; Start-Sleep -Seconds 1; Set-Content -LiteralPath $env:SURVIVED survived",
-            ]);
-            command
-        };
-        command.env("READY", ready).env("SURVIVED", survived);
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        command
+            .args([
+                "-e",
+                r#"
+                const fs = require("node:fs");
+                fs.writeFileSync(process.env.READY, "ready");
+                setTimeout(() => fs.writeFileSync(process.env.SURVIVED, "survived"), 1000);
+                "#,
+            ])
+            .env("READY", ready)
+            .env("SURVIVED", survived)
+            .stderr(Stdio::inherit());
         command
     }
 
@@ -3782,10 +4006,15 @@ mod tests {
 
     fn client_with_list_models_handler(handler: Arc<dyn ListModelsHandler>) -> Client {
         Client {
+            ahp_host_sessions: None,
             inner: Arc::new(ClientInner {
+                ahp_host_callbacks: Arc::new(ahp_host::ExitCallbacks::default()),
+                ahp_host_sessions: std::sync::Weak::new(),
                 child: parking_lot::Mutex::new(None),
+                owns_stdio: false,
+                force_stop_requested: tokio_util::sync::CancellationToken::new(),
                 process_tree: parking_lot::Mutex::new(None),
-                #[cfg(feature = "bundled-in-process")]
+                #[cfg(feature = "in-process")]
                 ffi_host: parking_lot::Mutex::new(None),
                 rpc: {
                     let (req_tx, _req_rx) = mpsc::unbounded_channel();
@@ -3809,6 +4038,9 @@ mod tests {
                 llm_inference: OnceLock::new(),
                 extension_launch_provider: Arc::new(
                     extension_launch_provider::ExtensionLaunchProviderDispatcher::new(None),
+                ),
+                installation_confirmation: Arc::new(
+                    installation_confirmation::InstallationConfirmationDispatcher::new(),
                 ),
                 on_github_telemetry: None,
                 on_get_trace_context: None,

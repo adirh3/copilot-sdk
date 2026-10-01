@@ -5,11 +5,51 @@ import { describe, expect, it } from "vitest";
 import {
     assertNoPublicInternalReferences,
     filterPublicSessionEventVariants,
+    isTypeScriptCodegenEntrypoint,
     normalizeSchemaForTypeScript,
+    tsNullableResultTypeName,
 } from "../../scripts/codegen/typescript.ts";
 import type { DefinitionCollections } from "../../scripts/codegen/utils.ts";
 
 describe("typescript schema codegen", () => {
+    it("preserves an explicit nullable reference result's named union", () => {
+        expect(
+            tsNullableResultTypeName(
+                {
+                    rpcMethod: "session.accounts.getCurrent",
+                    params: null,
+                    result: { $ref: "#/definitions/SessionAccountResult" },
+                },
+                {
+                    title: "SessionAccountResult",
+                    anyOf: [{ $ref: "#/definitions/SessionAccount" }, { type: "null" }],
+                }
+            )
+        ).toBe("SessionAccountResult");
+    });
+
+    it("retains the existing undefined result type for omission sentinels", () => {
+        expect(
+            tsNullableResultTypeName({
+                rpcMethod: "session.accounts.getCurrent",
+                params: null,
+                result: {
+                    anyOf: [{ $ref: "#/definitions/SessionAccount" }, { not: {} }],
+                },
+            })
+        ).toBe("SessionAccount | undefined");
+    });
+
+    it("recognizes Windows entrypoint paths case-insensitively", () => {
+        expect(
+            isTypeScriptCodegenEntrypoint(
+                "C:\\b\\execroot\\src\\sdk\\scripts\\codegen\\typescript.ts",
+                "c:\\B\\execroot\\src\\sdk\\scripts\\codegen\\typescript.ts",
+                "win32"
+            )
+        ).toBe(true);
+    });
+
     it("emits JSDoc comments for described enum values", async () => {
         const schema: JSONSchema7 = {
             title: "SyntheticOptions",
@@ -80,6 +120,32 @@ describe("typescript schema codegen", () => {
         );
 
         expect(code).toContain("[k: string]: JsonValue;");
+    });
+
+    it("keeps a titled discriminator literal inline", async () => {
+        const variant = (action: string) => ({
+            type: "object" as const,
+            properties: {
+                action: { type: "string" as const, const: action, title: "ReviewAction" },
+            },
+            required: ["action"],
+        });
+        const code = await compile(
+            normalizeSchemaForTypeScript({
+                title: "Review",
+                anyOf: [variant("install"), variant("uninstall")],
+            }),
+            "Review",
+            {
+                bannerComment: "",
+                style: { semi: true, singleQuote: false },
+                additionalProperties: false,
+            }
+        );
+
+        expect(code).toContain('action: "install";');
+        expect(code).toContain('action: "uninstall";');
+        expect(code).not.toContain("ReviewAction");
     });
 
     it("maps a bare opaque JSON array item to JsonValue", async () => {

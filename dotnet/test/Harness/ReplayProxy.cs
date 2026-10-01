@@ -27,38 +27,29 @@ public sealed partial class ReplayProxy : IAsyncDisposable
 
         async Task<string> StartCoreAsync()
         {
-            string filename;
-            string args;
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                filename = "cmd.exe";
-                args = "/c npm.cmd run start";
-
-            }
-            else
-            {
-                filename = "npm";
-                args = "run start";
-            }
-
+            // Spawn the server directly so a stalled npm/cmd wrapper cannot strand startup or cleanup.
             var startInfo = new ProcessStartInfo
             {
-                FileName = filename,
+                FileName = "node",
                 WorkingDirectory = Path.Join(FindRepoRoot(), "test", "harness"),
-                Arguments = args,
+                Arguments = "--import tsx server.ts",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
 
-            _process = new Process { StartInfo = startInfo };
+            var process = new Process { StartInfo = startInfo };
 
             var tcs = new TaskCompletionSource<string>();
             var errorOutput = new StringBuilder();
+            var startupTimer = Stopwatch.StartNew();
+            string CapturedErrors()
+            {
+                lock (errorOutput) return errorOutput.ToString();
+            }
 
-            _process.OutputDataReceived += (_, e) =>
+            process.OutputDataReceived += (_, e) =>
             {
                 if (e.Data == null) return;
                 var match = Regex.Match(e.Data, @"Listening: (?<url>http://[^\s]+)\s+(?<metadata>\{.*\})$");
@@ -98,28 +89,39 @@ public sealed partial class ReplayProxy : IAsyncDisposable
                 tcs.TrySetResult(match.Groups["url"].Value);
             };
 
-            _process.ErrorDataReceived += (_, e) =>
+            process.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data == null) return;
-                errorOutput.AppendLine(e.Data);
+                lock (errorOutput) errorOutput.AppendLine(e.Data);
                 Console.Error.WriteLine(e.Data);
             };
 
-            _process.Start();
-            _process.BeginOutputReadLine();
-            _process.BeginErrorReadLine();
-            _ = _process.WaitForExitAsync().ContinueWith(_ =>
+            try
             {
-                if (_process?.ExitCode is int exitCode && exitCode != 0)
+                process.Start();
+            }
+            catch
+            {
+                process.Dispose();
+                throw;
+            }
+            _process = process;
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            _ = process.WaitForExitAsync().ContinueWith(_ =>
+            {
+                if (!tcs.Task.IsCompleted)
                 {
-                    tcs.TrySetException(new Exception($"Proxy exited with code {_process.ExitCode}: {errorOutput}"));
+                    tcs.TrySetException(new Exception($"Proxy exited before listening with code {process.ExitCode}: {CapturedErrors()}"));
                 }
             });
 
             // Use longer timeout on Windows due to slower process startup
             var timeoutSeconds = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 30 : 10;
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-            cts.Token.Register(() => tcs.TrySetException(new TimeoutException("Timeout waiting for proxy")));
+            cts.Token.Register(() => tcs.TrySetException(new TimeoutException(
+                $"Timeout waiting for proxy after {startupTimer.ElapsedMilliseconds}ms " +
+                $"(exited: {process.HasExited}; stderr: {CapturedErrors()})")));
 
             return await tcs.Task;
         }
@@ -139,10 +141,17 @@ public sealed partial class ReplayProxy : IAsyncDisposable
             catch { /* Best effort */ }
         }
 
-        if (_process is { HasExited: false })
+        try
         {
-            try { _process.Kill(entireProcessTree: true); await _process.WaitForExitAsync(); }
-            catch { /* Ignore */ }
+            if (_process is { HasExited: false })
+            {
+                try { _process.Kill(entireProcessTree: true); await _process.WaitForExitAsync(); }
+                catch { /* Ignore */ }
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Process.Start failed before this object was associated with a child.
         }
 
         _process?.Dispose();
@@ -195,7 +204,7 @@ public sealed partial class ReplayProxy : IAsyncDisposable
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null)
         {
-            if (File.Exists(Path.Combine(dir.FullName, "justfile")))
+            if (File.Exists(Path.Combine(dir.FullName, "test", "harness", "package.json")))
                 return dir.FullName;
             dir = dir.Parent;
         }
@@ -222,7 +231,9 @@ public record CopilotUserConfig(
     string AnalyticsTrackingId,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     [property: JsonPropertyName("quota_snapshots")]
-    IReadOnlyDictionary<string, CopilotUserQuotaSnapshot>? QuotaSnapshots = null);
+    IReadOnlyDictionary<string, CopilotUserQuotaSnapshot>? QuotaSnapshots = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? Id = null);
 
 public record CopilotUserEndpoints(string Api, string Telemetry);
 
